@@ -5,7 +5,8 @@ let package = Package(
     name: "BridgeKit",
     platforms: [.macOS(.v14)],
     products: [
-        .library(name: "BridgeKitCore", targets: ["BridgeKitCore"]),
+        // Static, so apps built with plain swiftc can link libBridgeKitCore.a.
+        .library(name: "BridgeKitCore", type: .static, targets: ["BridgeKitCore"]),
     ],
     targets: [
         .target(name: "BridgeKitCore"),
