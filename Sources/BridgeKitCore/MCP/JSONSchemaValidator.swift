@@ -2,16 +2,25 @@ import CoreFoundation
 import Foundation
 
 /// Checks tool arguments against the JSON Schema features tool contracts use:
-/// `type`, `const`, `enum`, string length (UTF-8 bytes), number bounds, array
+/// `type`, `const`, `enum`, string length, number bounds, array
 /// size and uniqueness, `items`, `properties`, `required` and
 /// `additionalProperties: false`. Returns the first problem as
 /// "field: what was expected", or nil.
 public enum JSONSchemaValidator {
-    public static func validate(_ arguments: [String: Any], against schema: [String: Any]) -> String? {
-        check(arguments, against: schema, path: "")
+    /// What `minLength` and `maxLength` count. EK Bridge counts UTF-8 bytes;
+    /// Funes counts Unicode scalars, like its database's `length()`.
+    public enum StringLength: Sendable, Equatable {
+        case utf8Bytes
+        case unicodeScalars
     }
 
-    private static func check(_ value: Any, against schema: [String: Any], path: String) -> String? {
+    public static func validate(_ arguments: [String: Any], against schema: [String: Any],
+                                counting unit: StringLength = .utf8Bytes) -> String? {
+        check(arguments, against: schema, path: "", unit: unit)
+    }
+
+    private static func check(_ value: Any, against schema: [String: Any], path: String,
+                              unit: StringLength) -> String? {
         let label = path.isEmpty ? "arguments" : path
         if let types = schemaTypes(schema), !types.contains(where: { matches(value, type: $0) }) {
             return "\(label): expected \(describe(types)), got \(describeValue(value))"
@@ -24,13 +33,15 @@ public enum JSONSchemaValidator {
             return "\(label): expected one of \(list), got \(describeValue(value))"
         }
         if let text = value as? String {
-            let bytes = text.utf8.count
-            if let minimum = schema["minLength"] as? Int, bytes < minimum {
+            let length = unit == .utf8Bytes ? text.utf8.count : text.unicodeScalars.count
+            let units = unit == .utf8Bytes ? "bytes" : "characters"
+            if let minimum = schema["minLength"] as? Int, length < minimum {
                 return minimum == 1 ? "\(label): must not be empty"
-                    : "\(label): must be at least \(minimum) bytes"
+                    : "\(label): must be at least \(minimum) \(units)"
             }
-            if let maximum = schema["maxLength"] as? Int, bytes > maximum {
-                return "\(label): must be at most \(maximum) bytes of UTF-8, got \(bytes)"
+            if let maximum = schema["maxLength"] as? Int, length > maximum {
+                return unit == .utf8Bytes ? "\(label): must be at most \(maximum) bytes of UTF-8, got \(length)"
+                    : "\(label): must be at most \(maximum) characters, got \(length)"
             }
         }
         if let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() {
@@ -56,7 +67,7 @@ public enum JSONSchemaValidator {
             }
             if let itemSchema = schema["items"] as? [String: Any] {
                 for (index, item) in items.enumerated() {
-                    if let problem = check(item, against: itemSchema, path: "\(label)[\(index)]") {
+                    if let problem = check(item, against: itemSchema, path: "\(label)[\(index)]", unit: unit) {
                         return problem
                     }
                 }
@@ -77,7 +88,7 @@ public enum JSONSchemaValidator {
             }
             for name in object.keys.sorted() {
                 guard let propertySchema = properties[name] as? [String: Any] else { continue }
-                if let problem = check(object[name]!, against: propertySchema, path: join(path, name)) {
+                if let problem = check(object[name]!, against: propertySchema, path: join(path, name), unit: unit) {
                     return problem
                 }
             }

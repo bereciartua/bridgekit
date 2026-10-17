@@ -80,6 +80,8 @@ public struct BridgeConfiguration: Sendable {
     public var forwardedHeaders: [String]
     /// Header-name prefixes refused the same way ("x-forwarded-", "cf-").
     public var forwardedHeaderPrefixes: [String]
+    /// What the contract's `minLength`/`maxLength` count.
+    public var stringLength: JSONSchemaValidator.StringLength
     public var texts: BridgeTexts
 
     public init(identity: BridgeIdentity, mcpPort: Int, keyPrefix: String, serverKey: String,
@@ -88,7 +90,8 @@ public struct BridgeConfiguration: Sendable {
                 maxConnections: Int = LoopbackHTTPServer.defaultMaxConnections,
                 toolCallTimeout: TimeInterval = 55, allowedOrigins: Set<String> = [],
                 forwardedHeaders: [String] = MCPHTTPGate.defaultForwardedHeaders,
-                forwardedHeaderPrefixes: [String] = [], texts: BridgeTexts? = nil) {
+                forwardedHeaderPrefixes: [String] = [], stringLength: JSONSchemaValidator.StringLength = .utf8Bytes,
+                texts: BridgeTexts? = nil) {
         self.identity = identity
         self.mcpPort = mcpPort
         self.keyPrefix = keyPrefix
@@ -103,6 +106,7 @@ public struct BridgeConfiguration: Sendable {
         self.allowedOrigins = allowedOrigins
         self.forwardedHeaders = forwardedHeaders
         self.forwardedHeaderPrefixes = forwardedHeaderPrefixes
+        self.stringLength = stringLength
         self.texts = texts ?? .standard(displayName: identity.displayName)
     }
 }

@@ -286,3 +286,21 @@ struct JSONSchemaValidatorTests {
         #expect(JSONSchemaValidator.validate([:], against: ["type": "array"]) == "arguments: expected an array, got an object")
     }
 }
+
+@Suite("JSON Schema validator: string length units")
+struct StringLengthUnitTests {
+    let schema: [String: Any] = ["type": "object", "properties": ["text": ["type": "string", "minLength": 2, "maxLength": 3]]]
+
+    @Test func bytesByDefault() {
+        #expect(JSONSchemaValidator.validate(["text": "ééé"], against: schema)
+            == "text: must be at most 3 bytes of UTF-8, got 6")
+    }
+
+    @Test func unicodeScalars() {
+        #expect(JSONSchemaValidator.validate(["text": "ééé"], against: schema, counting: .unicodeScalars) == nil)
+        #expect(JSONSchemaValidator.validate(["text": "éééé"], against: schema, counting: .unicodeScalars)
+            == "text: must be at most 3 characters, got 4")
+        #expect(JSONSchemaValidator.validate(["text": "é"], against: schema, counting: .unicodeScalars)
+            == "text: must be at least 2 characters")
+    }
+}

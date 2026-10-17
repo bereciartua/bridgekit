@@ -199,19 +199,21 @@ public final class SecretFileStore: Sendable {
     }
 }
 
-/// MCP key files for one app: `<parent>/<folder>/<uuid>.mcp-token`.
+/// MCP key files for one app: `<parent>/<folder>/<uuid><suffix>` (`.mcp-token` by default).
 public struct AgentKeyFiles: Sendable {
     public let store: SecretFileStore
     public let keyPrefix: String
+    public let kind: SecretFileKind
 
-    public init(store: SecretFileStore, keyPrefix: String) {
+    public init(store: SecretFileStore, keyPrefix: String, kind: SecretFileKind = .mcpKey) {
         self.store = store
         self.keyPrefix = keyPrefix
+        self.kind = kind
     }
 
-    public func url(agentID: String) -> URL? { store.url(for: agentID, kind: .mcpKey) }
+    public func url(agentID: String) -> URL? { store.url(for: agentID, kind: kind) }
 
-    public func status(agentID: String) -> CredentialFileStatus { store.status(clientID: agentID, kind: .mcpKey) }
+    public func status(agentID: String) -> CredentialFileStatus { store.status(clientID: agentID, kind: kind) }
 
     public func saveNew(agentID: String, key: String) -> Result<URL, CredentialFileError> {
         write(agentID: agentID, key: key, replacing: false)
@@ -227,11 +229,11 @@ public struct AgentKeyFiles: Sendable {
     }
 
     public func remove(agentID: String) -> Result<Void, CredentialFileError> {
-        store.remove(clientID: agentID, kind: .mcpKey)
+        store.remove(clientID: agentID, kind: kind)
     }
 
     private func write(agentID: String, key: String, replacing: Bool) -> Result<URL, CredentialFileError> {
         guard AgentKey.isValid(key, prefix: keyPrefix) else { return .failure(.invalidCredential) }
-        return store.write(clientID: agentID, kind: .mcpKey, data: Data(key.utf8), replacing: replacing)
+        return store.write(clientID: agentID, kind: kind, data: Data(key.utf8), replacing: replacing)
     }
 }

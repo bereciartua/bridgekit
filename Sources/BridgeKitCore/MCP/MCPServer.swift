@@ -95,6 +95,12 @@ public final class MCPTrafficCounters: @unchecked Sendable {
         public var requests = 0
         public var byStatus = [Int: Int]()
         public var authFailures = 0
+
+        public init(requests: Int = 0, byStatus: [Int: Int] = [:], authFailures: Int = 0) {
+            self.requests = requests
+            self.byStatus = byStatus
+            self.authFailures = authFailures
+        }
     }
 
     private let lock = NSLock()
@@ -401,7 +407,8 @@ public final class MCPServer {
             return
         }
         // The model's typos never reach the handler, so they aren't Activity rows.
-        if let problem = JSONSchemaValidator.validate(arguments, against: tool.inputSchema) {
+        if let problem = JSONSchemaValidator.validate(arguments, against: tool.inputSchema,
+                                                      counting: configuration.stringLength) {
             finish(tools.failureResult(.invalidArguments(problem), tool: name, arguments: arguments).json)
             return
         }
