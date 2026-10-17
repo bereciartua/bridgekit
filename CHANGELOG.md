@@ -9,5 +9,10 @@
   `BridgeHandler`, `ToolContract`, `LauncherConfiguration`.
 - Main-actor hops use `Task { @MainActor in … }`, so hosts that run `dispatchMain()` work under
   Swift 6's isolation checks.
+- `BridgeKitCore` is a static library product, so apps built with plain `swiftc` link `libBridgeKitCore.a` from
+  either SwiftPM build system.
+- Timeouts pass an explicit tolerance to `Task.sleep`, so a 55 s answer isn't coalesced past agents' 60 s.
+- `AgentKeyFiles` takes the key file kind (`.mcp-token` by default); the validator counts string lengths in
+  UTF-8 bytes (default) or Unicode scalars (`BridgeConfiguration.stringLength`).
 - Tool calls are dispatched asynchronously (`BridgeHandler.handle(_:) async`); cancellation
   and an app-chosen timeout answer come through `ToolCall.context`.
