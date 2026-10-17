@@ -439,9 +439,11 @@ public final class MCPServer {
         context.onCancel { task.cancel() }
         // Answer before the agent's own timeout, so it gets the app's words.
         // The call isn't cancelled: a change in progress may still finish.
-        let nanoseconds = UInt64(configuration.toolCallTimeout * 1_000_000_000)
+        let timeout = Duration.milliseconds(Int64(configuration.toolCallTimeout * 1_000))
         Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: nanoseconds)
+            // An explicit tolerance: by default the system may coalesce a timer this long by
+            // several seconds, which would push 55 s past agents' 60 s.
+            try? await Task.sleep(for: timeout, tolerance: .milliseconds(100))
             guard !pending.answered, let self else { return }
             answer((context.timeoutResult ?? self.tools.failureResult(.timeout, tool: name, arguments: arguments)).json)
         }
