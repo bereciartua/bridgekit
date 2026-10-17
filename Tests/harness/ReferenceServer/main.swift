@@ -64,7 +64,7 @@ final class App {
                 continuation.resume(returning: decision)
             }
             waiting.append((id, resume))
-            call.cancellation.onCancel { [weak self] in
+            call.context.onCancel { [weak self] in
                 self?.waiting.removeAll { $0.id == id }
                 resume("cancelled")
             }

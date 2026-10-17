@@ -10,4 +10,4 @@
 - Main-actor hops use `Task { @MainActor in … }`, so hosts that run `dispatchMain()` work under
   Swift 6's isolation checks.
 - Tool calls are dispatched asynchronously (`BridgeHandler.handle(_:) async`); cancellation
-  comes through `ToolCall.cancellation`.
+  and an app-chosen timeout answer come through `ToolCall.context`.

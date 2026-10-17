@@ -278,10 +278,9 @@ public enum AgentConfigWriter {
     // MARK: Apply
 
     /// Writes the change after checking the file is still what the preview
-    /// read. Returns the backup's URL (nil for a new file).
+    /// read. Returns the backup's URL (nil for a new file). `tag` names the
+    /// app in the backup and temporary files (`<file>.<tag>-backup-<suffix>`).
     @discardableResult
-    /// `tag` names the app in the backup and temporary files
-    /// (`<file>.<tag>-backup-<suffix>`).
     public static func apply(_ change: ConfigChange, tag: String, backupSuffix: String,
                              fileManager: FileManager = .default) throws -> URL? {
         guard change.outcome != .unchanged else { return nil }

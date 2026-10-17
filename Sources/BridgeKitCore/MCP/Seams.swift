@@ -186,26 +186,30 @@ public struct ToolCall: @unchecked Sendable {
     public let agentName: String?
     /// Through a remote transport the app runs, rather than from this Mac.
     public let remote: Bool
-    /// Cancelled when the HTTP connection closes or the agent sends
-    /// `notifications/cancelled`; not when the server answers with a timeout.
-    public let cancellation: CallCancellation
+    /// Cancellation, and what a timeout means for this call.
+    public let context: CallContext
 
     public init(name: String, arguments: [String: Any], agent: AuthenticatedAgent, agentName: String?,
-                remote: Bool, cancellation: CallCancellation) {
+                remote: Bool, context: CallContext) {
         self.name = name
         self.arguments = arguments
         self.agent = agent
         self.agentName = agentName
         self.remote = remote
-        self.cancellation = cancellation
+        self.context = context
     }
 }
 
-/// Lets a transport cancel a call it handed to the app. Actions run on the
-/// main actor, synchronously when the call is cancelled.
+/// Shared between the transport and the app while a call runs, on the main actor.
 @MainActor
-public final class CallCancellation: Sendable {
+public final class CallContext: Sendable {
+    /// True once the HTTP connection closed or the agent sent
+    /// `notifications/cancelled`; not when the server answered with a timeout.
     public private(set) var isCancelled = false
+    /// What the server answers if the handler hasn't by `toolCallTimeout`.
+    /// The app sets it once it knows (an idempotency key it generated, say);
+    /// otherwise the registry's `failureResult(.timeout, …)` is used.
+    public var timeoutResult: ToolResult?
     private var actions = [() -> Void]()
 
     public nonisolated init() {}

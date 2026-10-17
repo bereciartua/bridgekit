@@ -194,7 +194,7 @@ public final class MCPServer {
     private var agents = [String: String]()
     /// Keyed by agent and JSON-RPC id. Two sessions of one agent can reuse
     /// an id, so each key holds a list.
-    private var inFlight = [String: [CallCancellation]]()
+    private var inFlight = [String: [CallContext]]()
 
     public init(configuration: BridgeConfiguration, authenticator: AgentAuthenticator, tools: ToolRegistry,
                 handler: BridgeHandler, limiter: RateLimiter, counters: MCPTrafficCounters,
@@ -405,9 +405,9 @@ public final class MCPServer {
             finish(tools.failureResult(.invalidArguments(problem), tool: name, arguments: arguments).json)
             return
         }
-        let cancellation = CallCancellation()
+        let context = CallContext()
         let call = ToolCall(name: name, arguments: arguments, agent: agent, agentName: agentName,
-                            remote: remote, cancellation: cancellation)
+                            remote: remote, context: context)
         let pending = PendingCall()
         let key = agent.id + "|" + id.key
         let answer: ([String: Any]) -> Void = { [weak self] result in
@@ -416,27 +416,27 @@ public final class MCPServer {
             pending.unregister?()
             pending.unregister = nil
             if let self {
-                self.inFlight[key]?.removeAll { $0 === cancellation }
+                self.inFlight[key]?.removeAll { $0 === context }
                 if self.inFlight[key]?.isEmpty == true { self.inFlight[key] = nil }
             }
             finish(result)
         }
-        inFlight[key, default: []].append(cancellation)
+        inFlight[key, default: []].append(context)
         // A disconnect cancels; what that means for a call in progress is the app's choice.
-        pending.unregister = whenClosed { [weak cancellation] in cancellation?.cancel() }
+        pending.unregister = whenClosed { [weak context] in context?.cancel() }
         let handler = self.handler
         let task = Task { @MainActor in
             let result = await handler.handle(call)
             answer(result.json)
         }
-        cancellation.onCancel { task.cancel() }
+        context.onCancel { task.cancel() }
         // Answer before the agent's own timeout, so it gets the app's words.
         // The call isn't cancelled: a change in progress may still finish.
         let nanoseconds = UInt64(configuration.toolCallTimeout * 1_000_000_000)
         Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: nanoseconds)
             guard !pending.answered, let self else { return }
-            answer(self.tools.failureResult(.timeout, tool: name, arguments: arguments).json)
+            answer((context.timeoutResult ?? self.tools.failureResult(.timeout, tool: name, arguments: arguments)).json)
         }
     }
 
