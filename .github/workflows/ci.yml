@@ -1,9 +1,16 @@
 name: CI
 
+# Manual runs and code changes in pull requests only, to save Actions minutes
+# (free once the repository is public).
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
   pull_request:
+    paths:
+      - "Package.swift"
+      - "Sources/**"
+      - "Tests/**"
+      - "scripts/**"
+      - ".github/workflows/**"
 
 permissions:
   contents: read
