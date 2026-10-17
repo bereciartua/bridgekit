@@ -1,34 +1,35 @@
 import Foundation
 
-/// Token buckets per client, plus a global throttle for failed MCP
-/// authentication. Limits are generous for interactive agents and stop runaway
-/// loops; write limits are sized so one client can't exceed its journal quota
-/// within the 7-day key lifetime (250/day × 7 < 2,000).
+/// Token buckets per agent, plus a global throttle for failed MCP
+/// authentication. The defaults are generous for interactive agents and stop
+/// runaway loops; each app sets its own `Policy`.
 ///
 /// Thread-safe: the HTTP queue checks the auth throttle before hopping to the
-/// main actor, and the pipeline uses the per-client buckets there.
-final class RateLimiter: @unchecked Sendable {
-    struct Policy {
-        var callsPerMinute = 120.0
-        var callBurst = 30.0
-        var writesPerMinute = 20.0
-        var writeBurst = 10.0
-        var writesPerDay = 250
-        var failedAuthsPerMinute = 120
-        var failedAuthLockout: TimeInterval = 60
+/// main actor, and the app's pipeline uses the per-agent buckets.
+public final class RateLimiter: @unchecked Sendable {
+    public struct Policy: Sendable {
+        public var callsPerMinute = 120.0
+        public var callBurst = 30.0
+        public var writesPerMinute = 20.0
+        public var writeBurst = 10.0
+        public var writesPerDay = 250
+        public var failedAuthsPerMinute = 120
+        public var failedAuthLockout: TimeInterval = 60
         // Remote Access is stricter: its own buckets per client (the daily
         // write cap is shared), and failed authentication per forwarded
         // address with a longer lockout.
-        var remoteCallsPerMinute = 60.0
-        var remoteCallBurst = 15.0
-        var remoteWritesPerMinute = 10.0
-        var remoteWriteBurst = 5.0
-        var remoteFailedAuthsPerMinute = 30
-        var remoteFailedAuthLockout: TimeInterval = 300
-        var maxRemoteKeys = 1_000
+        public var remoteCallsPerMinute = 60.0
+        public var remoteCallBurst = 15.0
+        public var remoteWritesPerMinute = 10.0
+        public var remoteWriteBurst = 5.0
+        public var remoteFailedAuthsPerMinute = 30
+        public var remoteFailedAuthLockout: TimeInterval = 300
+        public var maxRemoteKeys = 1_000
+
+        public init() {}
     }
 
-    enum Decision: Equatable {
+    public enum Decision: Equatable, Sendable {
         case allowed
         case limited(retryAfter: Int)
     }
@@ -39,7 +40,7 @@ final class RateLimiter: @unchecked Sendable {
     }
 
     private let policy: Policy
-    private let now: () -> TimeInterval
+    private let now: @Sendable () -> TimeInterval
     private let lock = NSLock()
     private var calls = [String: Bucket]()
     private var writes = [String: Bucket]()
@@ -49,13 +50,13 @@ final class RateLimiter: @unchecked Sendable {
     private var remoteFailures = [String: [TimeInterval]]()
     private var remoteLockedUntil = [String: TimeInterval]()
 
-    init(policy: Policy = Policy(), now: @escaping () -> TimeInterval = { Date().timeIntervalSince1970 }) {
+    public init(policy: Policy = Policy(), now: @escaping @Sendable () -> TimeInterval = { Date().timeIntervalSince1970 }) {
         self.policy = policy
         self.now = now
     }
 
     /// Takes a token for one call (and one write, for writes) or says how long to wait.
-    func allow(_ clientID: String, write: Bool, remote: Bool = false) -> Decision {
+    public func allow(_ clientID: String, write: Bool, remote: Bool = false) -> Decision {
         lock.lock()
         defer { lock.unlock() }
         let current = now()
@@ -93,7 +94,7 @@ final class RateLimiter: @unchecked Sendable {
 
     /// Charges the daily write cap. The pipeline calls this when a write is
     /// dispatched, so refused, invalid or declined writes don't use it up.
-    func recordWrite(_ clientID: String) {
+    public func recordWrite(_ clientID: String) {
         lock.lock()
         defer { lock.unlock() }
         let current = now()
@@ -102,7 +103,7 @@ final class RateLimiter: @unchecked Sendable {
 
     /// Counts one failed authentication from any caller. Past the limit, every
     /// unauthenticated request is refused for the lockout period.
-    func recordFailedAuth() {
+    public func recordFailedAuth() {
         lock.lock()
         defer { lock.unlock() }
         let current = now()
@@ -117,7 +118,7 @@ final class RateLimiter: @unchecked Sendable {
     /// address (or "unknown"); past the limit that address is refused for
     /// five minutes. Tunneled requests all come from loopback, so the local
     /// throttle can't tell callers apart.
-    func recordFailedRemoteAuth(_ address: String) {
+    public func recordFailedRemoteAuth(_ address: String) {
         lock.lock()
         defer { lock.unlock() }
         let current = now()
@@ -139,7 +140,7 @@ final class RateLimiter: @unchecked Sendable {
 
     /// Seconds until requests without a valid credential from `address` are accepted again.
     /// Addresses the table had no room for share the overflow key's lockout.
-    func remoteAuthLockout(_ address: String) -> Int? {
+    public func remoteAuthLockout(_ address: String) -> Int? {
         lock.lock()
         defer { lock.unlock() }
         let current = now()
@@ -154,7 +155,7 @@ final class RateLimiter: @unchecked Sendable {
 
     /// Seconds until unauthenticated requests are accepted again, or nil.
     /// Requests with a valid token never consult this.
-    func authLockout() -> Int? {
+    public func authLockout() -> Int? {
         lock.lock()
         defer { lock.unlock() }
         let remaining = lockedUntil - now()

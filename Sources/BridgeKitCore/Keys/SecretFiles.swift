@@ -1,35 +1,29 @@
 import Darwin
 import Foundation
 
-enum CredentialFileStatus: Equatable {
+public enum CredentialFileStatus: Equatable, Sendable {
     case present
     case missing
     /// Wrong owner, mode, type or size: never replaced automatically.
     case unsafe
 }
 
-/// The two secrets a client can hold, each in its own private file.
-enum CredentialKind: Hashable, CaseIterable {
-    /// The CLI's Ed25519 key: `<uuid>.json`, `{"clientID","key":"ekb_v1_…"}`.
-    case signingKey
-    /// The MCP bearer token: `<uuid>.mcp-token`, the bare token with no newline,
-    /// so agents can read it directly (`${file:…}`, `$(cat …)`, the launcher).
-    case mcpToken
-    /// Remote Access: the token a cloud agent sends through a tunnel. Unlike
-    /// the local token, it's pasted into the vendor's settings.
-    case remoteToken
+/// One kind of secret file an app keeps per agent, named `<uuid><suffix>`.
+public struct SecretFileKind: Hashable, Sendable {
+    public let fileSuffix: String
+    public let maxBytes: Int
 
-    var fileSuffix: String {
-        switch self {
-        case .signingKey: ".json"
-        case .mcpToken: ".mcp-token"
-        case .remoteToken: ".mcp-remote-token"
-        }
+    public init(fileSuffix: String, maxBytes: Int) {
+        self.fileSuffix = fileSuffix
+        self.maxBytes = maxBytes
     }
-    var maxBytes: Int { self == .signingKey ? 512 : 128 }
+
+    /// An MCP bearer key: the bare key with no newline, so agents can read it
+    /// directly (`${file:…}`, `$(cat …)`, the launcher).
+    public static let mcpKey = SecretFileKind(fileSuffix: ".mcp-token", maxBytes: 128)
 }
 
-enum CredentialFileError: String, Error {
+public enum CredentialFileError: String, Error, Sendable {
     case invalidCredential
     case unsafeDirectory
     case unsafeExistingFile
@@ -39,27 +33,28 @@ enum CredentialFileError: String, Error {
     case removeFailed
 }
 
-// Private credentials live outside the registry, which stores only verifiers.
-// The path is fixed by client UUID; no caller-supplied path enters file APIs.
-// This protects against other UIDs, not a malicious process with the same UID.
-final class ClientCredentialFiles {
-    private let parent: URL
-    private let directory: URL
+/// Private secrets (agent keys) live outside the app's agent store, which keeps
+/// only digests. The path is fixed by agent UUID; no caller-supplied path
+/// enters file APIs. Files are 0600 in a 0700 folder, written through a
+/// temporary file and `linkat`/`renameat`, then fsynced with their folder.
+/// This protects against other UIDs, not a malicious process with the same UID.
+public final class SecretFileStore: Sendable {
+    public let parent: URL
+    public let directory: URL
 
-    init(parent override: URL? = nil) {
-        let support = FileManager.default.urls(for: .applicationSupportDirectory,
-                                                in: .userDomainMask)[0]
-        parent = override ?? AppIdentity.dataFolder(inSupport: support)
-        directory = parent.appendingPathComponent("client-credentials", isDirectory: true)
+    /// `parent` must exist and be private; `folderName` is created inside it on first write.
+    public init(parent: URL, folderName: String) {
+        self.parent = parent
+        directory = parent.appendingPathComponent(folderName, isDirectory: true)
     }
 
-    func url(for clientID: String, kind: CredentialKind = .signingKey) -> URL? {
+    public func url(for clientID: String, kind: SecretFileKind) -> URL? {
         guard let uuid = UUID(uuidString: clientID) else { return nil }
         return directory.appendingPathComponent(uuid.uuidString.lowercased() + kind.fileSuffix)
     }
 
     /// Whether the file exists and is safe, without reading it.
-    func status(clientID: String, kind: CredentialKind = .signingKey) -> CredentialFileStatus {
+    public func status(clientID: String, kind: SecretFileKind) -> CredentialFileStatus {
         guard let destination = url(for: clientID, kind: kind) else { return .unsafe }
         var info = stat()
         // Folders that exist must be private and owned, or nothing is written.
@@ -74,7 +69,7 @@ final class ClientCredentialFiles {
         return Self.safe(info, kind: kind) ? .present : .unsafe
     }
 
-    func canReplace(clientID: String, kind: CredentialKind = .signingKey)
+    public func canReplace(clientID: String, kind: SecretFileKind)
         -> Result<URL, CredentialFileError> {
         guard let destination = url(for: clientID, kind: kind) else {
             return .failure(.invalidCredential)
@@ -90,29 +85,7 @@ final class ClientCredentialFiles {
         catch { return .failure(.unsafeDirectory) }
     }
 
-    func saveNew(clientID: String, key: String) -> Result<URL, CredentialFileError> {
-        write(clientID: clientID, kind: .signingKey, secret: key, replacing: false)
-    }
-
-    func replace(clientID: String, key: String) -> Result<URL, CredentialFileError> {
-        write(clientID: clientID, kind: .signingKey, secret: key, replacing: true)
-    }
-
-    func saveNew(clientID: String, token: String) -> Result<URL, CredentialFileError> {
-        write(clientID: clientID, kind: .mcpToken, secret: token, replacing: false)
-    }
-
-    func replace(clientID: String, token: String) -> Result<URL, CredentialFileError> {
-        write(clientID: clientID, kind: .mcpToken, secret: token, replacing: true)
-    }
-
-    /// Writes a remote token, replacing an existing safe file.
-    func save(clientID: String, remoteToken: String) -> Result<URL, CredentialFileError> {
-        let replacing = status(clientID: clientID, kind: .remoteToken) == .present
-        return write(clientID: clientID, kind: .remoteToken, secret: remoteToken, replacing: replacing)
-    }
-
-    func remove(clientID: String, kind: CredentialKind = .signingKey)
+    public func remove(clientID: String, kind: SecretFileKind)
         -> Result<Void, CredentialFileError> {
         guard let destination = url(for: clientID, kind: kind) else {
             return .failure(.invalidCredential)
@@ -140,11 +113,11 @@ final class ClientCredentialFiles {
         catch { return .failure(.unsafeDirectory) }
     }
 
-    private func write(clientID: String, kind: CredentialKind, secret: String, replacing: Bool)
+    /// Writes `data` as a new file (`replacing` false: fails if one exists) or
+    /// over an existing safe one (`replacing` true: fails if there's none).
+    public func write(clientID: String, kind: SecretFileKind, data: Data, replacing: Bool)
         -> Result<URL, CredentialFileError> {
-        guard let destination = url(for: clientID, kind: kind),
-              let data = Self.contents(clientID: clientID, kind: kind, secret: secret),
-              data.count <= kind.maxBytes else {
+        guard let destination = url(for: clientID, kind: kind), data.count <= kind.maxBytes else {
             return .failure(.invalidCredential)
         }
         do {
@@ -215,37 +188,50 @@ final class ClientCredentialFiles {
             info.st_mode & 0o077 == 0
     }
 
-    private static func safeFile(name: String, kind: CredentialKind, in directoryFD: Int32) -> Bool {
+    private static func safeFile(name: String, kind: SecretFileKind, in directoryFD: Int32) -> Bool {
         var info = stat()
         return fstatat(directoryFD, name, &info, AT_SYMLINK_NOFOLLOW) == 0 && safe(info, kind: kind)
     }
 
-    private static func safe(_ info: stat, kind: CredentialKind) -> Bool {
+    private static func safe(_ info: stat, kind: SecretFileKind) -> Bool {
         info.st_mode & S_IFMT == S_IFREG && info.st_uid == getuid() &&
             info.st_mode & 0o777 == 0o600 && info.st_size <= kind.maxBytes
     }
+}
 
-    private static func contents(clientID: String, kind: CredentialKind, secret: String) -> Data? {
-        switch kind {
-        case .signingKey:
-            guard validSecret(secret, prefix: "ekb_v1_") else { return nil }
-            return try? JSONSerialization.data(withJSONObject: [
-                "clientID": UUID(uuidString: clientID)!.uuidString.lowercased(),
-                "key": secret,
-            ], options: [.sortedKeys])
-        case .mcpToken:
-            guard validSecret(secret, prefix: "ekb_mcp_v1_") else { return nil }
-            return Data(secret.utf8)
-        case .remoteToken:
-            guard validSecret(secret, prefix: "ekb_mcpr_v1_") else { return nil }
-            return Data(secret.utf8)
-        }
+/// MCP key files for one app: `<parent>/<folder>/<uuid>.mcp-token`.
+public struct AgentKeyFiles: Sendable {
+    public let store: SecretFileStore
+    public let keyPrefix: String
+
+    public init(store: SecretFileStore, keyPrefix: String) {
+        self.store = store
+        self.keyPrefix = keyPrefix
     }
 
-    private static func validSecret(_ secret: String, prefix: String) -> Bool {
-        secret.hasPrefix(prefix) && secret.utf8.count == prefix.utf8.count + 64 &&
-            secret.utf8.dropFirst(prefix.utf8.count).allSatisfy {
-                (48...57).contains($0) || (97...102).contains($0)
-            }
+    public func url(agentID: String) -> URL? { store.url(for: agentID, kind: .mcpKey) }
+
+    public func status(agentID: String) -> CredentialFileStatus { store.status(clientID: agentID, kind: .mcpKey) }
+
+    public func saveNew(agentID: String, key: String) -> Result<URL, CredentialFileError> {
+        write(agentID: agentID, key: key, replacing: false)
+    }
+
+    public func replace(agentID: String, key: String) -> Result<URL, CredentialFileError> {
+        write(agentID: agentID, key: key, replacing: true)
+    }
+
+    /// Saves `key`, replacing a safe existing file.
+    public func save(agentID: String, key: String) -> Result<URL, CredentialFileError> {
+        write(agentID: agentID, key: key, replacing: status(agentID: agentID) == .present)
+    }
+
+    public func remove(agentID: String) -> Result<Void, CredentialFileError> {
+        store.remove(clientID: agentID, kind: .mcpKey)
+    }
+
+    private func write(agentID: String, key: String, replacing: Bool) -> Result<URL, CredentialFileError> {
+        guard AgentKey.isValid(key, prefix: keyPrefix) else { return .failure(.invalidCredential) }
+        return store.write(clientID: agentID, kind: .mcpKey, data: Data(key.utf8), replacing: replacing)
     }
 }

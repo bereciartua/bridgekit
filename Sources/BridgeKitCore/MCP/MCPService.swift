@@ -1,51 +1,49 @@
 import Foundation
 
 /// Runs the MCP server: the loopback listener, the HTTP gate on its queue,
-/// and the hop to the main actor for everything that touches the registry.
+/// and the hop to the main actor for everything that touches the app.
 @MainActor
-final class MCPService {
-    enum Status: Equatable {
+public final class MCPService {
+    public enum Status: Equatable, Sendable {
         case off
         case starting
         case listening(port: Int)
         case failed(LoopbackHTTPServer.Failure)
     }
 
-    private(set) var status = Status.off {
+    public private(set) var status = Status.off {
         didSet { if status != oldValue { statusChanged(status) } }
     }
-    var statusChanged: (Status) -> Void = { _ in }
+    public var statusChanged: (Status) -> Void = { _ in }
 
-    let counters: MCPTrafficCounters
+    public let counters: MCPTrafficCounters
     private let server: MCPServer
     private let limiter: RateLimiter
     private let endpointFile: MCPEndpointFile?
-    private let allowedOrigins: Set<String>
     private var listener: LoopbackHTTPServer?
     private var requestedPort = 0
     private var retried = false
     private var generation = 0
     private let boundPort = BoundPort()
 
-    init(server: MCPServer, limiter: RateLimiter, counters: MCPTrafficCounters,
-         endpointFile: MCPEndpointFile?, allowedOrigins: Set<String> = []) {
+    public init(server: MCPServer, limiter: RateLimiter, counters: MCPTrafficCounters,
+                endpointFile: MCPEndpointFile?) {
         self.server = server
         self.limiter = limiter
         self.counters = counters
         self.endpointFile = endpointFile
-        self.allowedOrigins = allowedOrigins
     }
 
     /// Starts listening on `port` (0 picks a free one, for tests), replacing
     /// any listener already running.
-    func start(port: Int) {
+    public func start(port: Int) {
         stopListener()
         requestedPort = port
         retried = false
         listen()
     }
 
-    func stop() {
+    public func stop() {
         stopListener()
         status = .off
     }
@@ -54,7 +52,9 @@ final class MCPService {
         generation += 1
         let current = generation
         let gate = makeHandler()
-        let listener = LoopbackHTTPServer(port: requestedPort, handler: gate)
+        let configuration = server.configuration
+        let listener = LoopbackHTTPServer(port: requestedPort, limits: configuration.http,
+                                          maxConnections: configuration.maxConnections, handler: gate)
         self.listener = listener
         status = .starting
         listener.start { [weak self] state in
@@ -81,8 +81,10 @@ final class MCPService {
                 retried = true
                 status = .starting
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-                    guard let self, self.status == .starting, self.listener == nil else { return }
-                    self.listen()
+                    MainActor.assumeIsolated {
+                        guard let self, self.status == .starting, self.listener == nil else { return }
+                        self.listen()
+                    }
                 }
             } else {
                 status = .failed(failure)
@@ -102,17 +104,17 @@ final class MCPService {
     /// answered there; the rest hop to the main actor.
     private func makeHandler() -> LoopbackHTTPServer.Handler {
         let port = boundPort
-        let origins = allowedOrigins
+        let configuration = server.configuration
         let limiter = limiter
         let counters = counters
-        let server = server
+        let server = UncheckedBox(server)
         return { request, connection, reply in
-            let send: (HTTPResponse, Bool) -> Void = { response, close in
+            let send: @Sendable (HTTPResponse, Bool) -> Void = { response, close in
                 counters.record(status: response.status)
                 reply(response, close)
             }
-            let token: String
-            switch MCPHTTPGate.check(request, port: port.value, allowedOrigins: origins) {
+            let key: String
+            switch MCPHTTPGate.check(request, port: port.value, configuration: configuration) {
             case .respond(let response, let close):
                 send(response, close)
                 return
@@ -123,14 +125,17 @@ final class MCPService {
                     send(MCPHTTPGate.lockedOut(retryAfter: wait), true)
                     return
                 }
-                token = ""
+                key = ""
             case .proceed(let presented):
-                token = presented
+                key = presented
             }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    server.handle(request, token: token, whenClosed: { action in
-                        connection.whenClosed { DispatchQueue.main.async { MainActor.assumeIsolated(action) } }
+                    server.value.handle(request, key: key, whenClosed: { action in
+                        let action = UncheckedBox(action)
+                        return connection.whenClosed {
+                            DispatchQueue.main.async { MainActor.assumeIsolated { action.value() } }
+                        }
                     }, reply: { send($0.response, $0.close) })
                 }
             }
@@ -147,4 +152,10 @@ private final class BoundPort: @unchecked Sendable {
         get { lock.lock(); defer { lock.unlock() }; return port }
         set { lock.lock(); port = newValue; lock.unlock() }
     }
+}
+
+/// Carries a main-actor value across a queue hop that ends on the main actor.
+struct UncheckedBox<Value>: @unchecked Sendable {
+    let value: Value
+    init(_ value: Value) { self.value = value }
 }

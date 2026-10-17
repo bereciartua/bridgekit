@@ -1,28 +1,34 @@
 import Foundation
 
-/// Finds a command-line agent such as `claude` (B07). A GUI app's PATH is
+/// Finds a command-line agent such as `claude`. A GUI app's PATH is
 /// minimal, so it never relies on it: it tries fixed install locations, then
 /// asks a login shell, accepting only an absolute path to an executable file.
-struct ExecutableLocator {
-    var isExecutable: (String) -> Bool
+public struct ExecutableLocator: Sendable {
+    public var isExecutable: @Sendable (String) -> Bool
     /// `command -v <name>` in a login shell; nil when it isn't found or times out.
-    var loginShellLookup: (String) -> String?
+    public var loginShellLookup: @Sendable (String) -> String?
 
-    static func candidates(_ name: String, home: String) -> [String] {
+    public init(isExecutable: @escaping @Sendable (String) -> Bool,
+                loginShellLookup: @escaping @Sendable (String) -> String?) {
+        self.isExecutable = isExecutable
+        self.loginShellLookup = loginShellLookup
+    }
+
+    public static func candidates(_ name: String, home: String) -> [String] {
         var paths = name == "claude" ? [home + "/.claude/local/claude"] : []
         paths += [home + "/.local/bin/\(name)", "/opt/homebrew/bin/\(name)", "/usr/local/bin/\(name)",
                   home + "/.npm-global/bin/\(name)", home + "/.bun/bin/\(name)"]
         return paths
     }
 
-    func locate(_ name: String, home: String) -> String? {
+    public func locate(_ name: String, home: String) -> String? {
         if let found = Self.candidates(name, home: home).first(where: isExecutable) { return found }
         guard let found = loginShellLookup(name)?.trimmingCharacters(in: .whitespacesAndNewlines),
               found.hasPrefix("/"), !found.contains("\n"), isExecutable(found) else { return nil }
         return found
     }
 
-    static let live = ExecutableLocator(
+    public static let live = ExecutableLocator(
         isExecutable: { path in
             var directory: ObjCBool = false
             return FileManager.default.fileExists(atPath: path, isDirectory: &directory) && !directory.boolValue
@@ -39,16 +45,16 @@ struct ExecutableLocator {
 
 /// Runs a program with an argument array (never a shell string), collecting
 /// its output, and stops it after `timeout` seconds.
-enum ProcessRunner {
-    struct Result {
-        let exitCode: Int32
-        let output: String
-        let timedOut: Bool
+public enum ProcessRunner {
+    public struct Result: Sendable {
+        public let exitCode: Int32
+        public let output: String
+        public let timedOut: Bool
     }
 
     /// `mergeErrors` false drops stderr, for tools whose warnings would get
     /// in the way of the JSON they print (`tailscale status --json`).
-    static func run(_ executable: String, _ arguments: [String], timeout: TimeInterval,
+    public static func run(_ executable: String, _ arguments: [String], timeout: TimeInterval,
                     environment: [String: String]? = nil, mergeErrors: Bool = true) -> Result? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)

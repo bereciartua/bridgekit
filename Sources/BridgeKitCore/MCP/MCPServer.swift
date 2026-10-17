@@ -1,23 +1,23 @@
 import Foundation
 
-/// The checks that need nothing but the HTTP request, in the order §7.4 of
-/// the plan fixes. They run on the HTTP queue, so a request that fails here
-/// never reaches the main actor or the registry.
-enum MCPHTTPGate {
-    enum Verdict {
-        case proceed(token: String)
-        /// A missing or malformed token: counted as a failed authentication.
+/// The checks that need nothing but the HTTP request, in a fixed order. They
+/// run on the HTTP queue, so a request that fails here never reaches the main
+/// actor or the app's agent store.
+public enum MCPHTTPGate {
+    public enum Verdict: Sendable {
+        case proceed(key: String)
+        /// A missing or malformed key: counted as a failed authentication.
         case unauthenticated
         case respond(HTTPResponse, close: Bool)
     }
 
-    static let path = "/mcp"
+    public static let path = "/mcp"
     /// Headers tunnels add. Local agents never send them, so their presence
     /// means a tunnel was pointed at the local port by mistake.
-    static let forwardedHeaders = ["tailscale-funnel-request", "cf-connecting-ip", "cf-ray",
-                                   "x-forwarded-host"]
+    public static let defaultForwardedHeaders = ["tailscale-funnel-request", "cf-connecting-ip", "cf-ray",
+                                                 "x-forwarded-host"]
 
-    static func check(_ request: HTTPRequest, port: Int, allowedOrigins: Set<String>) -> Verdict {
+    public static func check(_ request: HTTPRequest, port: Int, configuration: BridgeConfiguration) -> Verdict {
         guard request.path == path else {
             return .respond(text(404, "Not found. The MCP endpoint is \(path).\n"), close: false)
         }
@@ -27,16 +27,19 @@ enum MCPHTTPGate {
         guard host == "127.0.0.1:\(port)" || host == "localhost:\(port)" else {
             return .respond(HTTPResponse(status: 421), close: true)
         }
-        if let origin = request.header("origin"), !allowedOrigins.contains(origin) {
+        if let origin = request.header("origin"), !configuration.allowedOrigins.contains(origin) {
             return .respond(json(403, JSONRPC.error(
                 id: nil, code: JSONRPC.invalidRequest,
-                message: "Requests from web pages aren't accepted.", omitID: true)), close: false)
+                message: configuration.texts.originRefused, omitID: true)), close: false)
         }
-        if forwardedHeaders.contains(where: { request.header($0) != nil }) {
+        let forwarded = request.headers.contains { field in
+            configuration.forwardedHeaders.contains(field.name)
+                || configuration.forwardedHeaderPrefixes.contains { field.name.hasPrefix($0) }
+        }
+        if forwarded {
             return .respond(json(403, JSONRPC.error(
                 id: nil, code: JSONRPC.invalidRequest,
-                message: "This port is only for agents on this Mac. Point your tunnel at the "
-                    + "Remote Access port in \(AppIdentity.displayName).", omitID: true)), close: false)
+                message: configuration.texts.tunnelRefused, omitID: true)), close: false)
         }
         guard request.method == "POST" else {
             return .respond(HTTPResponse(status: 405, headers: [("Allow", "POST")]), close: false)
@@ -58,128 +61,151 @@ enum MCPHTTPGate {
               authorization.count > 7, authorization.prefix(7).lowercased() == "bearer " else {
             return .unauthenticated
         }
-        let token = String(authorization.dropFirst(7)).trimmingCharacters(in: .whitespaces)
-        guard ClientRegistry.validMCPToken(token) else { return .unauthenticated }
-        return .proceed(token: token)
+        let key = String(authorization.dropFirst(7)).trimmingCharacters(in: .whitespaces)
+        guard AgentKey.isValid(key, prefix: configuration.keyPrefix) else { return .unauthenticated }
+        return .proceed(key: key)
     }
 
-    static func unauthorized() -> HTTPResponse {
+    public static func unauthorized(_ configuration: BridgeConfiguration) -> HTTPResponse {
         var response = json(401, JSONRPC.error(
-            id: nil, code: JSONRPC.authenticationFailed,
-            message: "\(AppIdentity.displayName) doesn't recognize this agent's token. "
-                + "Copy the setup again from the connection's page in \(AppIdentity.displayName)."))
+            id: nil, code: JSONRPC.authenticationFailed, message: configuration.texts.unauthorized))
         // No resource_metadata parameter, so clients don't start OAuth.
-        response.headers.append(("WWW-Authenticate", "Bearer realm=\"\(AppIdentity.displayName)\""))
+        response.headers.append(("WWW-Authenticate", "Bearer realm=\"\(configuration.identity.displayName)\""))
         return response
     }
 
-    static func lockedOut(retryAfter: Int) -> HTTPResponse {
+    public static func lockedOut(retryAfter: Int) -> HTTPResponse {
         HTTPResponse(status: 429, headers: [("Retry-After", String(retryAfter))])
     }
 
-    static func json(_ status: Int, _ body: Data) -> HTTPResponse {
+    public static func json(_ status: Int, _ body: Data) -> HTTPResponse {
         HTTPResponse(status: status, headers: [("Content-Type", "application/json")], body: body)
     }
 
-    static func text(_ status: Int, _ body: String) -> HTTPResponse {
+    public static func text(_ status: Int, _ body: String) -> HTTPResponse {
         HTTPResponse(status: status, headers: [("Content-Type", "text/plain; charset=utf-8")],
                      body: Data(body.utf8))
     }
 }
 
-/// Counts only, never bodies: Settings ▸ Advanced shows them to help debug
-/// agent setups without logging data.
-final class MCPTrafficCounters: @unchecked Sendable {
-    struct Snapshot: Equatable {
-        var requests = 0
-        var byStatus = [Int: Int]()
-        var authFailures = 0
+/// Counts only, never bodies: an app can show them to help debug agent
+/// setups without logging data.
+public final class MCPTrafficCounters: @unchecked Sendable {
+    public struct Snapshot: Equatable, Sendable {
+        public var requests = 0
+        public var byStatus = [Int: Int]()
+        public var authFailures = 0
     }
 
     private let lock = NSLock()
     private var current = Snapshot()
 
-    var snapshot: Snapshot {
+    public init() {}
+
+    public var snapshot: Snapshot {
         lock.lock()
         defer { lock.unlock() }
         return current
     }
 
-    func record(status: Int) {
+    public func record(status: Int) {
         lock.lock()
         current.requests += 1
         if status >= 400 { current.byStatus[status, default: 0] += 1 }
         lock.unlock()
     }
 
-    func recordAuthFailure() {
+    public func recordAuthFailure() {
         lock.lock()
         current.authFailures += 1
         lock.unlock()
     }
 }
 
-/// How one listener authenticates its callers: the local port takes local
-/// MCP tokens; the Remote Access port takes remote tokens and OAuth access
-/// tokens. Everything after authentication is shared.
-@MainActor
-struct MCPAuthentication {
-    let authenticate: (String) -> Result<String, ClientRegistryError>
+/// How one listener authenticates its callers. The local port uses the app's
+/// `AgentAuthenticator`; an app's remote transport passes its own. Everything
+/// after authentication is shared.
+public struct MCPAuthentication {
+    public let authenticate: @MainActor (String) async -> AuthenticationOutcome
     /// The answer to a missing or wrong credential (may be a lockout).
-    let rejected: () -> MCPServer.Reply
-    let remote: Bool
+    public let rejected: @MainActor () -> MCPServer.Reply
+    public let remote: Bool
+
+    public init(authenticate: @escaping @MainActor (String) async -> AuthenticationOutcome,
+                rejected: @escaping @MainActor () -> MCPServer.Reply, remote: Bool) {
+        self.authenticate = authenticate
+        self.rejected = rejected
+        self.remote = remote
+    }
 }
 
 /// The MCP protocol on top of the HTTP gate: authentication, both protocol
 /// eras, and method dispatch. Stateless: no sessions are minted, so every
 /// request stands alone and a restart loses nothing.
 @MainActor
-final class MCPServer {
-    static let modernVersions = ["2026-07-28"]
-    static let legacyVersions = ["2025-11-25", "2025-06-18", "2025-03-26"]
-    static let legacyDefault = "2025-11-25"
-    static let toolCallTimeout: TimeInterval = 55
-    static let metaVersion = "io.modelcontextprotocol/protocolVersion"
-    static let metaCapabilities = "io.modelcontextprotocol/clientCapabilities"
-    static let metaClientInfo = "io.modelcontextprotocol/clientInfo"
-    static let metaServerInfo = "io.modelcontextprotocol/serverInfo"
-    static let metaClientName = "io.github.bereciartua.ekbridge/client"
+public final class MCPServer {
+    public static let modernVersions = ["2026-07-28"]
+    public static let legacyVersions = ["2025-11-25", "2025-06-18", "2025-03-26"]
+    public static let legacyDefault = "2025-11-25"
+    public static let metaVersion = "io.modelcontextprotocol/protocolVersion"
+    public static let metaCapabilities = "io.modelcontextprotocol/clientCapabilities"
+    public static let metaClientInfo = "io.modelcontextprotocol/clientInfo"
+    public static let metaServerInfo = "io.modelcontextprotocol/serverInfo"
 
-    struct Reply {
-        let response: HTTPResponse
-        var close = false
+    public struct Reply: Sendable {
+        public let response: HTTPResponse
+        public var close = false
+
+        public init(response: HTTPResponse, close: Bool = false) {
+            self.response = response
+            self.close = close
+        }
     }
 
-    /// The last authenticated MCP request from a client, for "Connected ·
-    /// Claude Code 2.4.1 · 2 min ago". In memory only; Activity holds history.
-    struct Connection: Equatable {
-        let at: Date
-        let agent: String?
-        /// Through Remote Access rather than from this Mac.
-        var remote = false
+    /// The last authenticated MCP request from an agent, for "Connected ·
+    /// Claude Code 2.4.1 · 2 min ago". In memory only.
+    public struct Connection: Equatable, Sendable {
+        public let at: Date
+        public let agent: String?
+        /// Through a remote transport rather than from this Mac.
+        public var remote = false
+
+        public init(at: Date, agent: String?, remote: Bool = false) {
+            self.at = at
+            self.agent = agent
+            self.remote = remote
+        }
     }
 
-    private let registry: ClientRegistry
-    private let pipeline: RequestPipeline
+    /// One tool call between dispatch and its answer.
+    private final class PendingCall {
+        var answered = false
+        var unregister: (() -> Void)?
+    }
+
+    public let configuration: BridgeConfiguration
+    private let authenticator: AgentAuthenticator
+    private let tools: ToolRegistry
+    private let handler: BridgeHandler
     private let limiter: RateLimiter
     private let counters: MCPTrafficCounters
-    private let zone: () -> TimeZone
     private let now: () -> Date
     private let didConnect: (String, Connection) -> Void
     private var agents = [String: String]()
-    /// Keyed by client and JSON-RPC id. Two sessions of one client can reuse
+    /// Keyed by agent and JSON-RPC id. Two sessions of one agent can reuse
     /// an id, so each key holds a list.
-    private var inFlight = [String: [PipelineTicket]]()
+    private var inFlight = [String: [CallCancellation]]()
 
-    init(registry: ClientRegistry, pipeline: RequestPipeline, limiter: RateLimiter,
-         counters: MCPTrafficCounters, zone: @escaping () -> TimeZone = { TimeZone.current },
-         now: @escaping () -> Date = Date.init,
-         didConnect: @escaping (String, Connection) -> Void = { _, _ in }) {
-        self.registry = registry
-        self.pipeline = pipeline
+    public init(configuration: BridgeConfiguration, authenticator: AgentAuthenticator, tools: ToolRegistry,
+                handler: BridgeHandler, limiter: RateLimiter, counters: MCPTrafficCounters,
+                now: @escaping () -> Date = Date.init,
+                didConnect: @escaping (String, Connection) -> Void = { _, _ in }) {
+        self.configuration = configuration
+        self.authenticator = authenticator
+        self.tools = tools
+        self.handler = handler
         self.limiter = limiter
         self.counters = counters
-        self.zone = zone
         self.now = now
         self.didConnect = didConnect
     }
@@ -187,20 +213,27 @@ final class MCPServer {
     /// Called on the main actor for a request that passed `MCPHTTPGate`.
     /// `whenClosed` registers work to run if the connection goes away first;
     /// it returns a closure that unregisters it.
-    func handle(_ request: HTTPRequest, token: String, auth: MCPAuthentication? = nil,
-                whenClosed: @escaping (@escaping @MainActor () -> Void) -> () -> Void,
-                reply: @escaping (Reply) -> Void) {
+    public func handle(_ request: HTTPRequest, key: String, auth: MCPAuthentication? = nil,
+                       whenClosed: @escaping (@escaping @MainActor () -> Void) -> () -> Void,
+                       reply: @escaping (Reply) -> Void) {
         let auth = auth ?? localAuthentication
-        let clientID: String
-        switch auth.authenticate(token) {
-        case .success(let id): clientID = id
-        case .failure(.unavailable):
+        Task { @MainActor in
+            let outcome = await auth.authenticate(key)
+            self.dispatch(request, outcome: outcome, auth: auth, whenClosed: whenClosed, reply: reply)
+        }
+    }
+
+    private func dispatch(_ request: HTTPRequest, outcome: AuthenticationOutcome, auth: MCPAuthentication,
+                          whenClosed: @escaping (@escaping @MainActor () -> Void) -> () -> Void,
+                          reply: @escaping (Reply) -> Void) {
+        let agent: AuthenticatedAgent
+        switch outcome {
+        case .authenticated(let found): agent = found
+        case .unavailable:
             reply(Reply(response: MCPHTTPGate.json(503, JSONRPC.error(
-                id: nil, code: JSONRPC.internalError,
-                message: "\(AppIdentity.displayName) can't read its client settings. "
-                    + "Ask the user to open \(AppIdentity.displayName) and check Overview."))))
+                id: nil, code: JSONRPC.internalError, message: configuration.texts.unavailable))))
             return
-        case .failure:
+        case .rejected:
             reply(auth.rejected())
             return
         }
@@ -230,7 +263,7 @@ final class MCPServer {
         case .request(let requestID, let name, let values): (id, method, params) = (requestID, name, values)
         }
 
-        // Era detection, per request (§8.2).
+        // Era detection, per request.
         let header = request.header("mcp-protocol-version")
         let meta = params["_meta"] as? [String: Any]
         let modern: Bool
@@ -285,20 +318,20 @@ final class MCPServer {
             modern = false
         }
 
-        // Local and remote agents of one client are remembered apart.
-        let agentKey = (remote ? "remote|" : "") + clientID
+        // Local and remote sessions of one agent are remembered apart.
+        let agentKey = (remote ? "remote|" : "") + agent.id
         if let info = (meta?[Self.metaClientInfo] ?? (method == "initialize" ? params["clientInfo"] : nil))
-            as? [String: Any], let agent = Self.agentName(info) {
-            agents[agentKey] = agent
+            as? [String: Any], let name = Self.agentName(info) {
+            agents[agentKey] = name
         }
-        let agent = agents[agentKey]
-        didConnect(clientID, Connection(at: now(), agent: agent, remote: remote))
+        let agentName = agents[agentKey]
+        didConnect(agent.id, Connection(at: now(), agent: agentName, remote: remote))
 
         guard let id else {
             // Notifications: accepted and, apart from cancellation, ignored.
             if method == "notifications/cancelled",
                let target = params["requestId"].flatMap(JSONRPCID.init(json:)) {
-                inFlight[clientID + "|" + target.key]?.forEach { $0.cancel() }
+                inFlight[agent.id + "|" + target.key]?.forEach { $0.cancel() }
             }
             reply(Reply(response: HTTPResponse(status: 202)))
             return
@@ -314,35 +347,33 @@ final class MCPServer {
                 "protocolVersion": Self.legacyVersions.contains(requested) ? requested : Self.legacyDefault,
                 "capabilities": ["tools": ["listChanged": false]],
                 "serverInfo": serverInfo(full: true),
-                "instructions": MCPToolCatalog.serverInstructions,
+                "instructions": tools.serverInstructions,
             ])
         case "server/discover":
             var result: [String: Any] = [
                 "supportedVersions": Self.modernVersions + Self.legacyVersions,
                 "capabilities": ["tools": [String: Any]()],
-                "instructions": MCPToolCatalog.serverInstructions,
+                "instructions": tools.serverInstructions,
             ]
-            if let name = registry.clients()?.first(where: { $0.id == clientID })?.name {
-                // Lets `bridge-mcp check` name the client the token belongs to.
-                result["_meta"] = [Self.metaClientName: ["name": name]]
+            if let name = agent.name {
+                // Lets `<launcher> check` name the agent the key belongs to.
+                result["_meta"] = [configuration.agentMetaKey: ["name": name]]
             }
             finish(result)
         case "ping" where !modern:
             finish([:])
         case "tools/list":
-            let grants = registry.clients()?.first(where: { $0.id == clientID })?.grants ?? []
             var result: [String: Any] = [
-                "tools": MCPToolCatalog.visibleTools(grants: grants).map(\.definition),
+                "tools": tools.visibleTools(for: agent).map(\.definition),
             ]
             if modern {
-                // The list varies by token, so it must not be shared between clients.
+                // The list varies by key, so it must not be shared between agents.
                 result["ttlMs"] = 30_000
                 result["cacheScope"] = "private"
             }
             finish(result)
         case "tools/call":
-            callTool(id: id, params: params, clientID: clientID,
-                     origin: remote ? .remote(agent: agent) : .mcp(agent: agent),
+            callTool(id: id, params: params, agent: agent, agentName: agentName, remote: remote,
                      whenClosed: whenClosed, finish: finish,
                      unknownTool: { reply(self.error(200, id, JSONRPC.invalidParams, $0)) })
         default:
@@ -350,20 +381,14 @@ final class MCPServer {
         }
     }
 
-    private func callTool(id: JSONRPCID, params: [String: Any], clientID: String, origin: RequestOrigin,
-                          whenClosed: (@escaping @MainActor () -> Void) -> () -> Void,
+    private func callTool(id: JSONRPCID, params: [String: Any], agent: AuthenticatedAgent, agentName: String?,
+                          remote: Bool, whenClosed: (@escaping @MainActor () -> Void) -> () -> Void,
                           finish: @escaping ([String: Any]) -> Void,
                           unknownTool: (String) -> Void) {
         // An unknown name is a protocol error; everything after is a tool error
         // the model can act on.
-        guard let name = params["name"] as? String, let tool = MCPToolCatalog.tool(named: name) else {
+        guard let name = params["name"] as? String, let tool = tools.tool(named: name) else {
             unknownTool("Unknown tool: \(params["name"] as? String ?? "")")
-            return
-        }
-        guard tool.command.isClientLevel || !tool.isWrite || MCPToolCatalog.writesEnabled else {
-            finish(MCPToolMapping.errorResult(tool: name, code: "invalid_arguments",
-                                              detail: MCPToolCatalog.writesDisabledMessage,
-                                              request: nil, retryAfter: nil))
             return
         }
         let arguments: [String: Any]
@@ -371,72 +396,68 @@ final class MCPServer {
         case nil, is NSNull: arguments = [:]
         case let object as [String: Any]: arguments = object
         default:
-            finish(MCPToolMapping.errorResult(tool: name, code: "invalid_arguments",
-                                              detail: "arguments: expected an object",
-                                              request: nil, retryAfter: nil))
+            finish(tools.failureResult(.invalidArguments("arguments: expected an object"),
+                                       tool: name, arguments: nil).json)
             return
         }
-        // The model's typos never reach the pipeline, so they aren't Activity rows.
-        if let problem = MCPToolCatalog.validate(tool, arguments) {
-            finish(MCPToolMapping.errorResult(tool: name, code: "invalid_arguments", detail: problem,
-                                              request: nil, retryAfter: nil))
+        // The model's typos never reach the handler, so they aren't Activity rows.
+        if let problem = JSONSchemaValidator.validate(arguments, against: tool.inputSchema) {
+            finish(tools.failureResult(.invalidArguments(problem), tool: name, arguments: arguments).json)
             return
         }
-        let zone = self.zone()
-        let request: BridgeRequest
-        switch MCPToolMapping.request(tool: name, arguments: arguments, zone: zone, now: now()) {
-        case .success(let built): request = built
-        case .failure(let failure):
-            finish(MCPToolMapping.errorResult(tool: name, code: failure.code, detail: failure.message,
-                                              request: nil, retryAfter: nil))
-            return
-        }
-        var answered = false
-        var ticket: PipelineTicket?
-        var unregister: (() -> Void)?
-        let key = clientID + "|" + id.key
+        let cancellation = CallCancellation()
+        let call = ToolCall(name: name, arguments: arguments, agent: agent, agentName: agentName,
+                            remote: remote, cancellation: cancellation)
+        let pending = PendingCall()
+        let key = agent.id + "|" + id.key
         let answer: ([String: Any]) -> Void = { [weak self] result in
-            guard !answered else { return }
-            answered = true
-            unregister?()
-            if let self, let ticket {
-                self.inFlight[key]?.removeAll { $0 === ticket }
+            guard !pending.answered else { return }
+            pending.answered = true
+            pending.unregister?()
+            pending.unregister = nil
+            if let self {
+                self.inFlight[key]?.removeAll { $0 === cancellation }
                 if self.inFlight[key]?.isEmpty == true { self.inFlight[key] = nil }
             }
             finish(result)
         }
-        let started = pipeline.handle(request, clientID: clientID, origin: origin) {
-            [weak self] core in
-            guard let self else { return }
-            answer(MCPToolMapping.toolResult(tool: name, request: request, core: core,
-                                             zone: zone, now: self.now()))
+        inFlight[key, default: []].append(cancellation)
+        // A disconnect cancels; what that means for a call in progress is the app's choice.
+        pending.unregister = whenClosed { [weak cancellation] in cancellation?.cancel() }
+        let handler = self.handler
+        let task = Task { @MainActor in
+            let result = await handler.handle(call)
+            answer(result.json)
         }
-        guard !answered else { return }
-        ticket = started
-        inFlight[key, default: []].append(started)
-        // A disconnect cancels: before the journal reservation nothing happens;
-        // after it, the write finishes and is recorded with nobody to tell.
-        unregister = whenClosed { [weak started] in started?.cancel() }
-        // Answer before the agent's own 60 s timeout, so it gets our words.
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.toolCallTimeout) {
-            answer(MCPToolMapping.errorResult(tool: name, code: "timeout", detail: nil,
-                                              request: request, retryAfter: nil))
+        cancellation.onCancel { task.cancel() }
+        // Answer before the agent's own timeout, so it gets the app's words.
+        // The call isn't cancelled: a change in progress may still finish.
+        let nanoseconds = UInt64(configuration.toolCallTimeout * 1_000_000_000)
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: nanoseconds)
+            guard !pending.answered, let self else { return }
+            answer(self.tools.failureResult(.timeout, tool: name, arguments: arguments).json)
         }
     }
 
     private var localAuthentication: MCPAuthentication {
-        MCPAuthentication(authenticate: { [registry] in registry.authenticateMCPToken($0) },
-                          rejected: { [weak self] in self?.rejectToken() ?? Reply(response: MCPHTTPGate.unauthorized()) },
-                          remote: false)
+        let authenticator = self.authenticator
+        let configuration = self.configuration
+        return MCPAuthentication(
+            authenticate: { await authenticator.authenticate(PresentedKey($0)) },
+            rejected: { [weak self] in
+                self?.rejectKey() ?? Reply(response: MCPHTTPGate.unauthorized(configuration))
+            },
+            remote: false)
     }
 
-    private func rejectToken() -> Reply {
+    private func rejectKey() -> Reply {
         counters.recordAuthFailure()
         limiter.recordFailedAuth()
         if let wait = limiter.authLockout() {
             return Reply(response: MCPHTTPGate.lockedOut(retryAfter: wait), close: true)
         }
-        return Reply(response: MCPHTTPGate.unauthorized())
+        return Reply(response: MCPHTTPGate.unauthorized(configuration))
     }
 
     private func result(_ id: JSONRPCID, _ result: [String: Any], modern: Bool) -> Reply {
@@ -458,23 +479,23 @@ final class MCPServer {
     }
 
     private func serverInfo(full: Bool) -> [String: Any] {
-        var info: [String: Any] = ["name": AppIdentity.mcpServerKey, "version": AppIdentity.version]
+        var info: [String: Any] = ["name": configuration.serverKey, "version": configuration.identity.version]
         if full {
-            info["title"] = AppIdentity.displayName
-            info["description"] = "Calendar and Reminders on this Mac, limited to what you granted this agent."
+            info["title"] = configuration.identity.displayName
+            info["description"] = configuration.serverDescription
         }
         return info
     }
 
     /// "name version" as the agent reported it, sanitized; display only.
-    static func agentName(_ info: [String: Any]) -> String? {
+    public static func agentName(_ info: [String: Any]) -> String? {
         guard let name = info["name"] as? String else { return nil }
         let version = info["version"] as? String
-        return ClientRegistry.sanitizedAgent([name, version].compactMap { $0 }.joined(separator: " "))
+        return AgentName.sanitized([name, version].compactMap { $0 }.joined(separator: " "))
     }
 
     /// `Mcp-Name` may use `=?base64?…?=` for names that aren't header-safe.
-    static func decodeHeaderValue(_ value: String) -> String? {
+    public static func decodeHeaderValue(_ value: String) -> String? {
         guard value.hasPrefix("=?base64?"), value.hasSuffix("?=") else { return value }
         let encoded = value.dropFirst(9).dropLast(2)
         return Data(base64Encoded: String(encoded)).flatMap { String(data: $0, encoding: .utf8) }

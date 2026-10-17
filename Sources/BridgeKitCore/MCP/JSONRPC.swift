@@ -2,11 +2,11 @@ import CoreFoundation
 import Foundation
 
 /// A JSON-RPC request ID: a string or an integer, echoed back with its type.
-enum JSONRPCID: Equatable, Hashable {
+public enum JSONRPCID: Equatable, Hashable, Sendable {
     case string(String)
     case int(Int)
 
-    var json: Any {
+    public var json: Any {
         switch self {
         case .string(let value): value
         case .int(let value): value
@@ -14,7 +14,7 @@ enum JSONRPCID: Equatable, Hashable {
     }
 
     /// For log-free keys such as in-flight request tracking.
-    var key: String {
+    public var key: String {
         switch self {
         case .string(let value): "s:" + value
         case .int(let value): "i:\(value)"
@@ -22,7 +22,7 @@ enum JSONRPCID: Equatable, Hashable {
     }
 
     /// Strings and whole numbers only; null, booleans and fractions are invalid.
-    init?(json value: Any) {
+    public init?(json value: Any) {
         if let text = value as? String {
             self = .string(text)
         } else if let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() {
@@ -41,7 +41,7 @@ enum JSONRPCID: Equatable, Hashable {
 
 /// One message from a client. MCP removed batching in 2025-06-18, so a body
 /// is exactly one object.
-enum JSONRPCMessage {
+public enum JSONRPCMessage {
     case request(id: JSONRPCID, method: String, params: [String: Any])
     case notification(method: String, params: [String: Any])
     /// A client's reply to a server request. We never send requests, so these
@@ -49,7 +49,7 @@ enum JSONRPCMessage {
     case response
 }
 
-enum JSONRPCParseError: Error, Equatable {
+public enum JSONRPCParseError: Error, Equatable {
     case parse
     case invalidRequest
     /// The request was malformed but its ID could be read, so the error can
@@ -57,19 +57,19 @@ enum JSONRPCParseError: Error, Equatable {
     case invalidRequestWithID(JSONRPCID)
 }
 
-enum JSONRPC {
-    static let parseError = -32700
-    static let invalidRequest = -32600
-    static let methodNotFound = -32601
-    static let invalidParams = -32602
-    static let internalError = -32603
-    /// Implementation-defined: the bearer token wasn't recognized.
-    static let authenticationFailed = -32001
+public enum JSONRPC {
+    public static let parseError = -32700
+    public static let invalidRequest = -32600
+    public static let methodNotFound = -32601
+    public static let invalidParams = -32602
+    public static let internalError = -32603
+    /// Implementation-defined: the bearer key wasn't recognized.
+    public static let authenticationFailed = -32001
     /// Reserved by MCP 2026-07-28 for Streamable HTTP header problems.
-    static let headerMismatch = -32020
-    static let unsupportedProtocolVersion = -32022
+    public static let headerMismatch = -32020
+    public static let unsupportedProtocolVersion = -32022
 
-    static func parse(_ body: Data) -> Result<JSONRPCMessage, JSONRPCParseError> {
+    public static func parse(_ body: Data) -> Result<JSONRPCMessage, JSONRPCParseError> {
         guard let value = try? JSONSerialization.jsonObject(with: body, options: [.fragmentsAllowed])
         else { return .failure(.parse) }
         guard let object = value as? [String: Any] else { return .failure(.invalidRequest) }
@@ -95,13 +95,13 @@ enum JSONRPC {
         return .success(.request(id: id, method: method, params: params))
     }
 
-    static func result(id: JSONRPCID, _ result: [String: Any]) -> Data {
+    public static func result(id: JSONRPCID, _ result: [String: Any]) -> Data {
         encode(["jsonrpc": "2.0", "id": id.json, "result": result])
     }
 
     /// `id` nil writes `"id": null`; `omitID` leaves the member out, as MCP
     /// asks for the Origin refusal.
-    static func error(id: JSONRPCID?, code: Int, message: String, data: Any? = nil,
+    public static func error(id: JSONRPCID?, code: Int, message: String, data: Any? = nil,
                       omitID: Bool = false) -> Data {
         var error: [String: Any] = ["code": code, "message": message]
         if let data { error["data"] = data }
@@ -110,7 +110,7 @@ enum JSONRPC {
         return encode(object)
     }
 
-    static func encode(_ object: Any) -> Data {
+    public static func encode(_ object: Any) -> Data {
         (try? JSONSerialization.data(withJSONObject: object,
                                      options: [.sortedKeys, .withoutEscapingSlashes]))
             ?? Data(#"{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"Internal error"}}"#.utf8)

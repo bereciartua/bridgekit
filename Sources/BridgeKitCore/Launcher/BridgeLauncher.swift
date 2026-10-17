@@ -1,10 +1,11 @@
 import Darwin
 import Foundation
 
-// bridge-mcp: a dumb pipe between agents and the in-app MCP server. It relays
-// stdio to HTTP on 127.0.0.1, prints headers for Claude Code's headersHelper,
-// and diagnoses setups. No MCP logic and no grants: the server decides
-// everything. Foundation and Darwin only, built with SafePath + AppIdentity.
+// The stdio launcher (EK Bridge's bridge-mcp, Funes's funes-mcp): a dumb pipe
+// between agents and the in-app MCP server. It relays stdio to HTTP on
+// 127.0.0.1, prints headers for Claude Code's headersHelper, and diagnoses
+// setups. No MCP logic and no grants: the server decides everything.
+// Each app's launcher target is a main.swift calling `BridgeLauncher.run`.
 
 enum LauncherExit {
     static let ok: Int32 = 0
@@ -29,7 +30,7 @@ enum Log {
     /// One line per problem, prefixed so agents' MCP logs show where it came
     /// from. Callers never pass the token.
     static func line(_ text: String) {
-        raw("bridge-mcp: " + text)
+        raw(Launcher.config.launcherName + ": " + text)
     }
 
     static func raw(_ text: String) {
@@ -66,20 +67,11 @@ enum Output {
 // MARK: - Paths
 
 enum LauncherPaths {
-    // Test builds (-D EVENTKIT_MCP_TEST) never touch the real support folder:
-    // without the override they point at a path that doesn't exist.
-    static var supportDirectory: String {
-        #if EVENTKIT_MCP_TEST
-        return ProcessInfo.processInfo.environment["EVENTKIT_TEST_SUPPORT_DIR"]
-            ?? "/var/empty/ek-bridge-test-support"
-        #else
-        return AppIdentity.toolDataFolder(
-            inSupport: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]).path
-        #endif
-    }
+    static var supportDirectory: String { Launcher.config.supportDirectory() }
 
     static func tokenFile(clientID: UUID) -> String {
-        supportDirectory + "/client-credentials/" + clientID.uuidString.lowercased() + ".mcp-token"
+        supportDirectory + "/" + Launcher.config.keyFolderName + "/" + clientID.uuidString.lowercased()
+            + Launcher.config.keyFileSuffix
     }
 
     static var endpointFile: String { supportDirectory + "/mcp-endpoint.json" }
@@ -103,6 +95,8 @@ struct LauncherInvocation {
     var tokenPath: String { tokenFile ?? LauncherPaths.tokenFile(clientID: client!) }
 
     static func parse(_ arguments: [String]) throws -> LauncherInvocation {
+        let launcher = Launcher.config.launcherName
+        let agentOption = "--" + Launcher.config.agentOption
         var result = LauncherInvocation()
         var help = false, version = false
         var command: String?
@@ -125,8 +119,8 @@ struct LauncherInvocation {
                     name = String(argument[..<equals])
                     value = String(argument[argument.index(after: equals)...])
                 }
-                guard ["--client", "--token-file", "--url"].contains(name) else {
-                    record(.usage("unknown option \"\(name)\". Run bridge-mcp --help."))
+                guard [agentOption, "--token-file", "--url"].contains(name) else {
+                    record(.usage("unknown option \"\(name)\". Run \(launcher) --help."))
                     continue
                 }
                 if value == nil, index < arguments.count, !arguments[index].hasPrefix("--") {
@@ -134,12 +128,12 @@ struct LauncherInvocation {
                     index += 1
                 }
                 guard let value, !value.isEmpty else {
-                    record(.usage("option \"\(name)\" needs a value. Run bridge-mcp --help."))
+                    record(.usage("option \"\(name)\" needs a value. Run \(launcher) --help."))
                     continue
                 }
                 let duplicate: Bool
                 switch name {
-                case "--client":
+                case agentOption:
                     duplicate = clientValue != nil
                     clientValue = clientValue ?? value
                 case "--token-file":
@@ -153,10 +147,10 @@ struct LauncherInvocation {
             } else if command == nil && index == 1 {
                 command = argument
                 if argument != "headers" && argument != "check" {
-                    record(.usage("unknown command \"\(argument)\". Run bridge-mcp --help."))
+                    record(.usage("unknown command \"\(argument)\". Run \(launcher) --help."))
                 }
             } else {
-                record(.usage("unexpected argument \"\(argument)\". Run bridge-mcp --help."))
+                record(.usage("unexpected argument \"\(argument)\". Run \(launcher) --help."))
             }
         }
 
@@ -165,70 +159,33 @@ struct LauncherInvocation {
         if version { result.mode = .version; return result }
         if let firstError { throw firstError }
         if result.url != nil && result.mode != .headers {
-            throw LauncherError.usage("--url is only for bridge-mcp headers.")
+            throw LauncherError.usage("--url is only for \(launcher) headers.")
         }
         if clientValue != nil && result.tokenFile != nil {
-            throw LauncherError.usage("use --client or --token-file, not both.")
+            throw LauncherError.usage("use \(agentOption) or --token-file, not both.")
         }
         if let clientValue {
             // Agent configs must survive renames, and the launcher never reads
             // the registry, so only the ID is accepted.
             guard let uuid = UUID(uuidString: clientValue.trimmingCharacters(in: .whitespaces)) else {
-                throw LauncherError.usage(
-                    "--client takes the connection's ID (a UUID), not its name. "
-                        + "Copy the setup from the connection's page in \(AppIdentity.displayName).")
+                throw LauncherError.usage(Launcher.config.texts.agentIDNotUUID)
             }
             result.client = uuid
         } else if result.tokenFile == nil {
-            throw LauncherError.usage("missing --client or --token-file. Run bridge-mcp --help.")
+            throw LauncherError.usage("missing \(agentOption) or --token-file. Run \(launcher) --help.")
         }
         return result
     }
-}
-
-enum LauncherHelp {
-    static let text = """
-        Usage: bridge-mcp --client ID                     stdio MCP relay
-               bridge-mcp --token-file PATH               stdio relay, explicit token file
-               bridge-mcp headers --client ID --url URL   for Claude Code's headersHelper
-               bridge-mcp check --client ID               diagnose a setup
-               bridge-mcp --help | --version
-
-        Connects an agent on this Mac to \(AppIdentity.displayName)'s MCP server. The relay reads one
-        JSON-RPC message per stdin line, posts it to the server and writes each reply as one
-        stdout line. Problems go to stderr. Copy the setup for your agent from the connection's
-        page in \(AppIdentity.displayName).
-
-        Options:
-          --client ID         The client's ID (a UUID). Its token file is read from
-                              ~/Library/Application Support/\(AppIdentity.dataFolderName)/client-credentials.
-          --token-file PATH   Read the token from this file (mode 600) instead.
-          --url URL           headers only: the URL in the agent's config. The token is
-                              printed only when it's the URL the app serves and the listener
-                              there is this user's \(AppIdentity.displayName).
-                              CLAUDE_CODE_MCP_SERVER_URL takes precedence when set.
-
-        Exit codes:
-          0  ok (relay: stdin closed)
-          1  check: token rejected
-          2  usage error
-          3  check, headers: app or server unavailable, or another program on its port
-          4  missing or unsafe token file
-        headers prints {} on stdout whenever it refuses, with the reason on stderr.
-
-        """
 }
 
 // MARK: - Token file
 
 enum TokenFile {
     static let maxBytes = 128
-    static let prefix = "ekb_mcp_v1_"
 
-    /// Same rule as ClientRegistry.validMCPToken: prefix + 64 lowercase hex.
+    /// Same rule as the server's: prefix + 64 lowercase hex.
     static func validShape(_ token: String) -> Bool {
-        token.utf8.count == 75 && token.hasPrefix(prefix) &&
-            token.utf8.dropFirst(11).allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+        AgentKey.isValid(token, prefix: Launcher.config.keyPrefix)
     }
 
     /// The token, or exit-4 errors worded like bridge-client's.
@@ -256,7 +213,7 @@ enum TokenFile {
     }
 
     private static func notTokenFile(_ path: String) -> LauncherError {
-        problem("\(path) isn't an MCP token file for \(AppIdentity.displayName).")
+        problem("\(path) isn't an MCP token file for \(Launcher.config.displayName).")
     }
 
     private static func problem(_ message: String) -> LauncherError {
@@ -331,7 +288,7 @@ enum ListenerCheck {
         case mismatch(String)
     }
 
-    /// Confirms the endpoint's pid is this user's EK Bridge and holds a
+    /// Confirms the endpoint's pid is this user's app and holds a
     /// TCP listener on 127.0.0.1:port, before the token is sent there.
     static func verify(_ endpoint: Endpoint) -> Failure? {
         let pid = endpoint.pid
@@ -352,35 +309,34 @@ enum ListenerCheck {
 
     static func executablePath(_ pid: pid_t) -> String? {
         var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
-        guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return nil }
-        return String(cString: buffer)
+        let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
+        guard length > 0 else { return nil }
+        return String(decoding: buffer.prefix(Int(length)).map { UInt8(bitPattern: $0) }, as: UTF8.self)
     }
 
-    #if EVENTKIT_MCP_TEST
-    // Test builds stand a plain harness binary in for the app bundle; uid and
-    // socket checks stay real.
     private static func identityProblem(_ path: String, pid: pid_t) -> String? {
-        guard let expected = ProcessInfo.processInfo.environment["EVENTKIT_MCP_TEST_SERVER_PATH"] else {
-            return "EVENTKIT_MCP_TEST_SERVER_PATH isn't set"
+        if let test = Launcher.config.testMode {
+            // Test builds stand a plain harness binary in for the app bundle;
+            // uid and socket checks stay real.
+            guard let expected = ProcessInfo.processInfo.environment[test.serverPathVariable] else {
+                return "\(test.serverPathVariable) isn't set"
+            }
+            var resolved = expected
+            if let real = realpath(expected, nil) {
+                resolved = String(cString: real)
+                free(real)
+            }
+            return resolved == path ? nil : "process \(pid) (\(path)) isn't the test server"
         }
-        var resolved = expected
-        if let real = realpath(expected, nil) {
-            resolved = String(cString: real)
-            free(real)
-        }
-        return resolved == path ? nil : "process \(pid) (\(path)) isn't the test server"
-    }
-    #else
-    private static func identityProblem(_ path: String, pid: pid_t) -> String? {
+        let app = Launcher.config.displayName
         guard let own = executablePath(getpid()).flatMap(enclosingBundleIdentifier) else {
-            return "bridge-mcp isn't inside the \(AppIdentity.displayName) app"
+            return "\(Launcher.config.launcherName) isn't inside the \(app) app"
         }
         guard enclosingBundleIdentifier(path) == own else {
-            return "process \(pid) (\(path)) isn't \(AppIdentity.displayName)"
+            return "process \(pid) (\(path)) isn't \(app)"
         }
         return nil
     }
-    #endif
 
     /// The CFBundleIdentifier of `…/X.app/Contents/MacOS/<executable>`. Bundle.main
     /// isn't used: for this tool it needn't be the app.
@@ -438,7 +394,6 @@ enum Wire {
     static let metaVersion = "io.modelcontextprotocol/protocolVersion"
     static let metaCapabilities = "io.modelcontextprotocol/clientCapabilities"
     static let metaClientInfo = "io.modelcontextprotocol/clientInfo"
-    static let metaClientName = "io.github.bereciartua.ekbridge/client"
     static let timeout: TimeInterval = 60
 
     struct Reply {
@@ -581,19 +536,20 @@ enum RPC {
 }
 
 enum RelayText {
-    private static let app = AppIdentity.displayName
-    static let notRunning = "\(app) isn't running, or it's paused. "
-        + "Open \(app) and turn it on."
-    static let timeout = "No response from \(app) after 60 s. If this was a change, it may have happened. "
-        + "Read before retrying."
-    static let lost = "\(app) closed the connection before replying. If this was a change, it may have "
-        + "happened. Read before retrying."
-    static let squatter = "Another program is using \(app)'s port. "
-        + "Open \(app) and check Settings ▸ Advanced."
-    static let badEndpoint = "\(app)'s endpoint file isn't valid, so nothing was sent. "
-        + "Quit and reopen \(app)."
-    static let rejected = "\(app) doesn't recognize this connection's token. "
-        + "Open the connection in \(app) and check MCP access."
+    private static var app: String { Launcher.config.displayName }
+    static var notRunning: String { "\(app) isn't running, or it's paused. Open \(app) and turn it on." }
+    static var timeout: String {
+        "No response from \(app) after 60 s. If this was a change, it may have happened. Read before retrying."
+    }
+    static var lost: String {
+        "\(app) closed the connection before replying. If this was a change, it may have "
+            + "happened. Read before retrying."
+    }
+    static var squatter: String { Launcher.config.texts.squatter }
+    static var badEndpoint: String {
+        "\(app)'s endpoint file isn't valid, so nothing was sent. Quit and reopen \(app)."
+    }
+    static var rejected: String { Launcher.config.texts.rejected }
 
     static func refused(_ status: Int, _ explanation: String) -> String {
         "\(app) refused the request (HTTP \(status)): \(explanation)"
@@ -624,7 +580,7 @@ final class Relay: @unchecked Sendable {
     static let graceSeconds: TimeInterval = 5
     static let graceInterval: TimeInterval = 0.2
 
-    private struct Message {
+    private struct Message: @unchecked Sendable {
         let body: Data
         let method: String?
         let id: Any?
@@ -635,7 +591,8 @@ final class Relay: @unchecked Sendable {
         let expectsReply: Bool
     }
 
-    private final class Pending {
+    // Guarded by the relay's lock.
+    private final class Pending: @unchecked Sendable {
         var task: URLSessionTask?
         var cancelled = false
     }
@@ -816,8 +773,8 @@ final class Relay: @unchecked Sendable {
             }
             return
         }
-        Log.line(reason.map { "\(AppIdentity.displayName) isn't reachable: \($0)." }
-                 ?? "\(AppIdentity.displayName) isn't running, or it's paused.")
+        let app = Launcher.config.displayName
+        Log.line(reason.map { "\(app) isn't reachable: \($0)." } ?? "\(app) isn't running, or it's paused.")
         finish(message, entry, RPC.error(id: message.id, code: -32000, message: RelayText.notRunning))
     }
 
@@ -836,9 +793,9 @@ final class Relay: @unchecked Sendable {
             Log.line("the connection closed before a reply to \(message.method ?? "a message").")
             return finish(message, entry, RPC.error(id: message.id, code: -32000, message: RelayText.lost))
         case .failure(.other(let code)):
-            Log.line("couldn't reach \(AppIdentity.displayName) (URL error \(code)).")
+            Log.line("couldn't reach \(Launcher.config.displayName) (URL error \(code)).")
             return finish(message, entry, RPC.error(id: message.id, code: -32603,
-                                                    message: "Couldn't reach \(AppIdentity.displayName) "
+                                                    message: "Couldn't reach \(Launcher.config.displayName) "
                                                         + "(URL error \(code))."))
         case .success(let value):
             reply = value
@@ -852,7 +809,7 @@ final class Relay: @unchecked Sendable {
             guard let object = RPC.object(reply.body) else {
                 Log.line("unreadable reply to \(message.method ?? "a message").")
                 return finish(message, entry, RPC.error(id: message.id, code: -32603,
-                                                        message: "\(AppIdentity.displayName) sent an "
+                                                        message: "\(Launcher.config.displayName) sent an "
                                                             + "unreadable reply."))
             }
             if message.method == "initialize",
@@ -873,8 +830,7 @@ final class Relay: @unchecked Sendable {
                 Log.line("the token was rejected; retrying with the token file's new token.")
                 return attempt(message, entry, retriedAuth: true)
             }
-            Log.line("the token was rejected. Open the client in \(AppIdentity.displayName) "
-                     + "and check MCP access.")
+            Log.line(Launcher.config.texts.rejectedLog)
             finish(message, entry, RPC.error(id: message.id, code: -32001, message: RelayText.rejected))
         case 400, 404:
             if var object = RPC.object(reply.body), object["error"] != nil {
@@ -918,7 +874,7 @@ enum HeadersHelper {
         }
         let environment = ProcessInfo.processInfo.environment["CLAUDE_CODE_MCP_SERVER_URL"] ?? ""
         guard let target = environment.isEmpty ? invocation.url : environment else {
-            return refuse("error: missing --url. Run bridge-mcp --help.", LauncherExit.usage)
+            return refuse("error: missing --url. Run \(Launcher.config.launcherName) --help.", LauncherExit.usage)
         }
         let deadline = Date().addingTimeInterval(Relay.graceSeconds)
         while true {
@@ -933,9 +889,8 @@ enum HeadersHelper {
                 return refuse("\(reason); no token was printed.", LauncherExit.unavailable)
             }
             guard target == endpoint.url.absoluteString else {
-                return refuse("the agent's URL \(target) isn't the one \(AppIdentity.displayName) serves "
-                              + "(\(endpoint.url.absoluteString)). Copy the setup again from the "
-                              + "client's page.", LauncherExit.unavailable)
+                return refuse(Launcher.config.texts.urlMismatch(target, endpoint.url.absoluteString),
+                              LauncherExit.unavailable)
             }
             switch ListenerCheck.verify(endpoint) {
             case .gone?:
@@ -960,12 +915,12 @@ enum HeadersHelper {
 // MARK: - check
 
 enum SetupCheck {
-    private static let app = AppIdentity.displayName
+    private static var app: String { Launcher.config.displayName }
 
     static func run(_ invocation: LauncherInvocation) -> Int32 {
         let subject = invocation.client.map { id -> String in
             let text = id.uuidString.lowercased()
-            return "client " + text.prefix(4) + "…" + text.suffix(4)
+            return Launcher.config.texts.agentNoun + " " + text.prefix(4) + "…" + text.suffix(4)
         } ?? "token file " + LauncherPaths.display(invocation.tokenPath)
         Log.raw("\(app) MCP check for \(subject)")
 
@@ -1007,9 +962,9 @@ enum SetupCheck {
             discover = result
         }
         good("app running, MCP server listening on \(endpoint.url.absoluteString)")
-        let name = ((discover["_meta"] as? [String: Any])?[Wire.metaClientName] as? [String: Any])?["name"]
+        let name = ((discover["_meta"] as? [String: Any])?[Launcher.config.agentMetaKey] as? [String: Any])?["name"]
             as? String
-        good("token accepted" + (name.map { ": client \"\($0)\"" } ?? ""))
+        good("token accepted" + (name.map { ": \(Launcher.config.texts.agentNoun) \"\($0)\"" } ?? ""))
 
         let tools: [String]
         switch call(endpoint, token, id: 2, method: "tools/list", params: [:]) {
@@ -1019,31 +974,23 @@ enum SetupCheck {
             tools = (result["tools"] as? [[String: Any]] ?? []).compactMap { $0["name"] as? String }
         }
         if tools.isEmpty {
-            warn("no tools available: grant this client access in \(app)")
+            warn(Launcher.config.texts.noTools)
         } else {
             good("\(tools.count) tool\(tools.count == 1 ? "" : "s") available: "
                  + tools.joined(separator: ", "))
         }
 
-        // Only a tool call reveals the bridge switch; list_collections is
-        // read-only and always visible. It shows in Activity like any call.
-        if tools.contains("list_collections") {
+        // Only a tool call reveals the app's on/off switch. The probe is a
+        // read-only, always-visible tool; it shows in Activity like any call.
+        if let probe = Launcher.config.probe, tools.contains(probe.tool) {
             switch call(endpoint, token, id: 3, method: "tools/call",
-                        params: ["name": "list_collections", "arguments": [String: Any]()]) {
+                        params: ["name": probe.tool, "arguments": [String: Any]()]) {
             case .failure(let failure):
-                warn("list_collections failed: \(failure.text)")
+                warn("\(probe.tool) failed: \(failure.text)")
             case .success(let result):
-                let text = ((result["content"] as? [[String: Any]])?.first?["text"] as? String) ?? ""
-                if result["isError"] as? Bool == true {
-                    if text.contains("(code: bridge_off)") {
-                        warn("\(app) is paused: tool calls will be refused until it's turned on")
-                    } else if text.contains("(code: client_paused)") {
-                        warn("this client is paused: tool calls will be refused until it's resumed in \(app)")
-                    } else {
-                        warn("list_collections failed: \(text)")
-                    }
-                } else {
-                    good("\(app) is on")
+                switch probe.interpret(result) {
+                case .on: good("\(app) is on")
+                case .warning(let text): warn(text)
                 }
             }
         }
@@ -1061,7 +1008,8 @@ enum SetupCheck {
         params["_meta"] = [
             Wire.metaVersion: Wire.modernVersion,
             Wire.metaCapabilities: [String: Any](),
-            Wire.metaClientInfo: ["name": "bridge-mcp check", "version": LauncherVersion.string],
+            Wire.metaClientInfo: ["name": "\(Launcher.config.launcherName) check",
+                                  "version": LauncherVersion.string],
         ] as [String: Any]
         let body = RPC.serialize(["jsonrpc": "2.0", "id": id, "method": method, "params": params])
         let headers = Wire.headers(token: token, method: method, name: params["name"] as? String,
@@ -1078,9 +1026,7 @@ enum SetupCheck {
             return .failure(Failure(text: "couldn't reach \(app) (\(other))", exit: LauncherExit.unavailable))
         case .success(let reply):
             if reply.status == 401 {
-                return .failure(Failure(text: "token rejected: open the client in \(app) "
-                                            + "and check MCP access",
-                                        exit: LauncherExit.tokenRejected))
+                    return .failure(Failure(text: Launcher.config.texts.checkRejected, exit: LauncherExit.tokenRejected))
             }
             let object = RPC.object(reply.body)
             guard reply.status == 200, let result = object?["result"] as? [String: Any] else {
@@ -1103,20 +1049,22 @@ enum SetupCheck {
 }
 
 enum LauncherVersion {
-    /// The enclosing app's version; AppIdentity's Bundle.main lookup is the
-    /// fallback for builds outside a bundle.
+    /// The enclosing app's version; Bundle.main's is the fallback for builds
+    /// outside a bundle.
     static var string: String {
         ListenerCheck.executablePath(getpid())
             .flatMap(ListenerCheck.enclosingBundleInfo)?["CFBundleShortVersionString"] as? String
-            ?? AppIdentity.version
+            ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "–"
     }
 }
 
 // MARK: - Entry point
 
-@main
-struct BridgeMCP {
-    static func main() {
+/// The launcher's entry point. Each app's launcher target is one line:
+/// `BridgeLauncher.run(configuration)`.
+public enum BridgeLauncher {
+    public static func run(_ configuration: LauncherConfiguration) -> Never {
+        Launcher.config = configuration
         // A reply racing the agent closing its end must not kill the process.
         signal(SIGPIPE, SIG_IGN)
         let arguments = Array(CommandLine.arguments.dropFirst())
@@ -1132,10 +1080,10 @@ struct BridgeMCP {
         }
         switch invocation.mode {
         case .help:
-            Output.write(STDOUT_FILENO, Data(LauncherHelp.text.utf8))
+            Output.write(STDOUT_FILENO, Data(configuration.texts.help.utf8))
             exit(LauncherExit.ok)
         case .version:
-            Output.line(Data("bridge-mcp \(LauncherVersion.string)".utf8))
+            Output.line(Data("\(configuration.launcherName) \(LauncherVersion.string)".utf8))
             exit(LauncherExit.ok)
         case .headers:
             exit(HeadersHelper.run(invocation))

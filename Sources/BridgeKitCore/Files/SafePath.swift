@@ -1,11 +1,11 @@
 import Darwin
 import Foundation
 
-// Private-file checks shared by bridge-client, bridge-mcp and the app (Copy
-// Token…). Every read refuses symlinks, other owners and group/other access.
+// Private-file checks shared by the launcher and the app. Every read refuses
+// symlinks, other owners and group/other access.
 
-enum SafePath {
-    enum Problem: Error {
+public enum SafePath {
+    public enum Problem: Error, Equatable, Sendable {
         case missing
         case symlink
         case otherOwner
@@ -16,7 +16,7 @@ enum SafePath {
     }
 
     /// A private directory: not a symlink, owned by this user, no group/other access.
-    static func checkDirectory(_ path: String) throws {
+    public static func checkDirectory(_ path: String) throws {
         var details = stat()
         guard lstat(path, &details) == 0 else {
             throw errno == ENOENT || errno == ENOTDIR ? Problem.missing : Problem.unreadable(errno)
@@ -28,7 +28,7 @@ enum SafePath {
 
     /// A private regular file: not a symlink, owned by this user, no
     /// group/other access, at most `maxBytes`.
-    static func readFile(_ path: String, maxBytes: Int) throws -> Data {
+    public static func readFile(_ path: String, maxBytes: Int) throws -> Data {
         let fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         guard fd >= 0 else {
             let code = errno
@@ -60,7 +60,7 @@ enum SafePath {
         }
     }
 
-    static func atomicWrite(_ data: Data, to path: String) -> Bool {
+    public static func atomicWrite(_ data: Data, to path: String) -> Bool {
         let temporary = URL(fileURLWithPath: path).deletingLastPathComponent()
             .appendingPathComponent(".tmp-\(UUID().uuidString)").path
         let fd = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
@@ -84,12 +84,12 @@ enum SafePath {
     }
 }
 
-enum Hex {
-    static func encode(_ data: Data) -> String {
+public enum Hex {
+    public static func encode(_ data: Data) -> String {
         data.map { String(format: "%02x", $0) }.joined()
     }
 
-    static func decode(_ string: String) -> Data? {
+    public static func decode(_ string: String) -> Data? {
         guard string.count == 64, string.utf8.allSatisfy({
             (48...57).contains($0) || (97...102).contains($0)
         }) else { return nil }

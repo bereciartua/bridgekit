@@ -1,34 +1,49 @@
 import Foundation
 
-// One-click agent setup (B07, D3): adds EK Bridge's entry to another app's
-// JSON config file, after a click, with a preview and a backup, never with a
-// token. Foundation-only and unit tested.
+// One-click agent setup: adds an app's entry to an agent's JSON (or Codex's
+// TOML) config file, after a click, with a preview and a backup, never with a
+// key. Foundation-only and unit tested.
 //
 // Rules: refuse what doesn't parse (or isn't an object, or is over 1 MB);
 // keep every other key and value and the user's formatting by inserting text
 // instead of re-serializing; check the result means exactly "the old file plus
 // this entry"; re-read before writing; back up first; write atomically.
 
-struct DiffLine: Equatable {
-    enum Kind: Equatable { case context, added, removed }
-    let kind: Kind
-    let text: String
+public struct DiffLine: Equatable, Sendable {
+    public enum Kind: Equatable, Sendable { case context, added, removed }
+    public let kind: Kind
+    public let text: String
+
+    public init(kind: Kind, text: String) {
+        self.kind = kind
+        self.text = text
+    }
 }
 
 /// What the preview shows and what `apply` writes.
-struct ConfigChange: Equatable {
-    enum Outcome: Equatable { case created, added, replaced, unchanged }
+public struct ConfigChange: Equatable, Sendable {
+    public enum Outcome: Equatable, Sendable { case created, added, replaced, unchanged }
 
-    let fileURL: URL
+    public let fileURL: URL
     /// nil when the file doesn't exist yet.
-    let before: Data?
-    let after: Data
-    let outcome: Outcome
-    let summary: String
-    let diffLines: [DiffLine]
+    public let before: Data?
+    public let after: Data
+    public let outcome: Outcome
+    public let summary: String
+    public let diffLines: [DiffLine]
+
+    public init(fileURL: URL, before: Data?, after: Data, outcome: Outcome, summary: String,
+                diffLines: [DiffLine]) {
+        self.fileURL = fileURL
+        self.before = before
+        self.after = after
+        self.outcome = outcome
+        self.summary = summary
+        self.diffLines = diffLines
+    }
 }
 
-enum ConfigWriteError: Error, Equatable {
+public enum ConfigWriteError: Error, Equatable, Sendable {
     case invalidJSON(String)
     case notAnObject
     /// `root` exists but isn't an object.
@@ -45,30 +60,31 @@ enum ConfigWriteError: Error, Equatable {
     case inlineTable(String)
     case notText
 
-    var message: String {
+    /// The reason in a sentence, naming the app that won't change the file.
+    public func message(appName app: String) -> String {
         switch self {
-        case .invalidJSON(let reason): String(localized: "The file isn't valid JSON (\(reason)), so EK Bridge won't change it.")
-        case .notAnObject: String(localized: "The file doesn't hold a JSON object, so EK Bridge won't change it.")
-        case .rootNotAnObject(let root): String(localized: "Its “\(root)” isn't an object, so EK Bridge won't change it.")
-        case .tooLarge: String(localized: "The file is over 1 MB, so EK Bridge won't change it.")
-        case .unreadable: String(localized: "The file can't be read.")
-        case .unwritable(let reason): String(localized: "The file couldn't be written: \(reason)")
-        case .changedSinceReading: String(localized: "The file changed while the preview was open. Nothing was written; try again.")
-        case .verificationFailed: String(localized: "EK Bridge couldn't add its entry without changing anything else, so nothing was written.")
-        case .existingEntry(let key): String(localized: "It already has a different “\(key)” entry, so EK Bridge won't change it.")
-        case .inlineTable(let table): String(localized: "Its \(table) is written on one line, so EK Bridge won't change it.")
-        case .notText: String(localized: "The file isn't UTF-8 text, so EK Bridge won't change it.")
+        case .invalidJSON(let reason): "The file isn't valid JSON (\(reason)), so \(app) won't change it."
+        case .notAnObject: "The file doesn't hold a JSON object, so \(app) won't change it."
+        case .rootNotAnObject(let root): "Its “\(root)” isn't an object, so \(app) won't change it."
+        case .tooLarge: "The file is over 1 MB, so \(app) won't change it."
+        case .unreadable: "The file can't be read."
+        case .unwritable(let reason): "The file couldn't be written: \(reason)"
+        case .changedSinceReading: "The file changed while the preview was open. Nothing was written; try again."
+        case .verificationFailed: "\(app) couldn't add its entry without changing anything else, so nothing was written."
+        case .existingEntry(let key): "It already has a different “\(key)” entry, so \(app) won't change it."
+        case .inlineTable(let table): "Its \(table) is written on one line, so \(app) won't change it."
+        case .notText: "The file isn't UTF-8 text, so \(app) won't change it."
         }
     }
 }
 
-enum AgentConfigWriter {
-    static let maxBytes = 1_000_000
+public enum AgentConfigWriter {
+    public static let maxBytes = 1_000_000
 
     // MARK: Merge (pure)
 
     /// The file after adding `entry` under `root` ▸ `key`, and what that does.
-    static func merge(current: Data?, root: String = "mcpServers", key: String,
+    public static func merge(current: Data?, root: String = "mcpServers", key: String,
                       entry: SetupJSON) throws -> (after: Data, outcome: ConfigChange.Outcome) {
         let text = current.map { String(decoding: $0, as: UTF8.self) } ?? ""
         guard (current?.count ?? 0) <= maxBytes else { throw ConfigWriteError.tooLarge }
@@ -119,7 +135,7 @@ enum AgentConfigWriter {
         return (Data(result.utf8), outcome)
     }
 
-    static func parse(_ data: Data) throws -> [String: Any] {
+    public static func parse(_ data: Data) throws -> [String: Any] {
         let value: Any
         do {
             value = try JSONSerialization.jsonObject(with: data, options: [])
@@ -135,17 +151,17 @@ enum AgentConfigWriter {
 
     /// Reads the file (if any) and builds the change. `fileURL` is the path as
     /// configured; a symbolic link is followed, so dotfile setups keep their link.
-    static func preview(fileURL: URL, root: String = "mcpServers", key: String, entry: SetupJSON,
+    public static func preview(fileURL: URL, root: String = "mcpServers", key: String, entry: SetupJSON,
                         fileManager: FileManager = .default) throws -> ConfigChange {
         let target = fileURL.resolvingSymlinksInPath()
         let before = try read(target, fileManager: fileManager)
         let merged = try merge(current: before, root: root, key: key, entry: entry)
         let name = fileURL.lastPathComponent
         let summary: String = switch merged.outcome {
-        case .created: String(localized: "Creates \(name) with “\(key)” under \(root)")
-        case .added: String(localized: "Adds “\(key)” to \(root)")
-        case .replaced: String(localized: "Replaces the existing “\(key)” entry")
-        case .unchanged: String(localized: "Already set up: “\(key)” is there and up to date")
+        case .created: "Creates \(name) with “\(key)” under \(root)"
+        case .added: "Adds “\(key)” to \(root)"
+        case .replaced: "Replaces the existing “\(key)” entry"
+        case .unchanged: "Already set up: “\(key)” is there and up to date"
         }
         return ConfigChange(fileURL: target, before: before, after: merged.after, outcome: merged.outcome,
                             summary: summary, diffLines: diff(before ?? Data(), merged.after))
@@ -158,7 +174,7 @@ enum AgentConfigWriter {
     /// server is already defined differently, or in any other shape (a dotted
     /// key, a line in [mcp_servers], an inline mcp_servers), since TOML
     /// can't define it twice.
-    static func appendTOML(current: Data?, key: String, table: String) throws -> (after: Data, outcome: ConfigChange.Outcome) {
+    public static func appendTOML(current: Data?, key: String, table: String) throws -> (after: Data, outcome: ConfigChange.Outcome) {
         guard let current else { return (Data((table + "\n").utf8), .created) }
         guard let text = String(data: current, encoding: .utf8) else { throw ConfigWriteError.notText }
         let tableLines = table.components(separatedBy: "\n")
@@ -205,7 +221,7 @@ enum AgentConfigWriter {
         return (Data(after.utf8), .added)
     }
 
-    /// "[ mcp_servers . "ek-bridge" ]" → "[mcp_servers.ek-bridge]".
+    /// "[ mcp_servers . "my-app" ]" → "[mcp_servers.my-app]".
     private static func normalizedHeader(_ line: String) -> String {
         var header = line
         if let comment = header.range(of: "#", options: .backwards), !header[comment.lowerBound...].contains("]") {
@@ -215,22 +231,22 @@ enum AgentConfigWriter {
             .trimmingCharacters(in: .whitespaces)
     }
 
-    static func previewTOML(fileURL: URL, key: String, table: String,
+    public static func previewTOML(fileURL: URL, key: String, table: String,
                             fileManager: FileManager = .default) throws -> ConfigChange {
         let target = fileURL.resolvingSymlinksInPath()
         let before = try read(target, fileManager: fileManager)
         let appended = try appendTOML(current: before, key: key, table: table)
         let name = fileURL.lastPathComponent
         let summary: String = switch appended.outcome {
-        case .created: String(localized: "Creates \(name) with the “\(key)” server")
-        case .unchanged: String(localized: "Already set up: “\(key)” is there and up to date")
-        default: String(localized: "Adds the “\(key)” server at the end")
+        case .created: "Creates \(name) with the “\(key)” server"
+        case .unchanged: "Already set up: “\(key)” is there and up to date"
+        default: "Adds the “\(key)” server at the end"
         }
         return ConfigChange(fileURL: target, before: before, after: appended.after, outcome: appended.outcome,
                             summary: summary, diffLines: diff(before ?? Data(), appended.after))
     }
 
-    static func read(_ url: URL, fileManager: FileManager) throws -> Data? {
+    public static func read(_ url: URL, fileManager: FileManager) throws -> Data? {
         guard fileManager.fileExists(atPath: url.path) else { return nil }
         let size = (try? fileManager.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
         guard size <= maxBytes else { throw ConfigWriteError.tooLarge }
@@ -239,7 +255,7 @@ enum AgentConfigWriter {
     }
 
     /// Changed lines with up to two lines of context on each side.
-    static func diff(_ before: Data, _ after: Data, context: Int = 2) -> [DiffLine] {
+    public static func diff(_ before: Data, _ after: Data, context: Int = 2) -> [DiffLine] {
         let old = String(decoding: before, as: UTF8.self).components(separatedBy: "\n")
         let new = String(decoding: after, as: UTF8.self).components(separatedBy: "\n")
         var prefix = 0
@@ -264,8 +280,10 @@ enum AgentConfigWriter {
     /// Writes the change after checking the file is still what the preview
     /// read. Returns the backup's URL (nil for a new file).
     @discardableResult
-    static func apply(_ change: ConfigChange, backupSuffix: String,
-                      fileManager: FileManager = .default) throws -> URL? {
+    /// `tag` names the app in the backup and temporary files
+    /// (`<file>.<tag>-backup-<suffix>`).
+    public static func apply(_ change: ConfigChange, tag: String, backupSuffix: String,
+                             fileManager: FileManager = .default) throws -> URL? {
         guard change.outcome != .unchanged else { return nil }
         let url = change.fileURL
         let current = try read(url, fileManager: fileManager)
@@ -280,16 +298,16 @@ enum AgentConfigWriter {
             var permissions = 0o600
             if current != nil {
                 permissions = (try? fileManager.attributesOfItem(atPath: url.path)[.posixPermissions] as? Int) ?? 0o600
-                let copy = folder.appendingPathComponent("\(url.lastPathComponent).ekbridge-backup-\(backupSuffix)")
+                let copy = folder.appendingPathComponent("\(url.lastPathComponent).\(tag)-backup-\(backupSuffix)")
                 try? fileManager.removeItem(at: copy)
                 try fileManager.copyItem(at: url, to: copy)
                 try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: copy.path)
                 backup = copy
             }
-            let temporary = folder.appendingPathComponent(".\(url.lastPathComponent).ekbridge-\(UUID().uuidString)")
+            let temporary = folder.appendingPathComponent(".\(url.lastPathComponent).\(tag)-\(UUID().uuidString)")
             guard fileManager.createFile(atPath: temporary.path, contents: change.after,
                                          attributes: [.posixPermissions: permissions]) else {
-                throw ConfigWriteError.unwritable(String(localized: "couldn't create a temporary file"))
+                throw ConfigWriteError.unwritable("couldn't create a temporary file")
             }
             if current != nil {
                 _ = try fileManager.replaceItemAt(url, withItemAt: temporary)
@@ -305,7 +323,7 @@ enum AgentConfigWriter {
     }
 
     /// "20261008-154210", for backup names.
-    static func backupSuffix(_ date: Date = Date(), timeZone: TimeZone = .current) -> String {
+    public static func backupSuffix(_ date: Date = Date(), timeZone: TimeZone = .current) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = timeZone

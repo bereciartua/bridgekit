@@ -1,43 +1,62 @@
 import Foundation
 
-/// MCP-PLAN §7.3. Chunk-size lines and trailers get their own small caps, so a chunked request never
+/// Chunk-size lines and trailers get their own small caps, so a chunked request never
 /// holds more than `maxBodyBytes` plus a few KiB of framing.
-struct HTTPLimits {
-    var maxHeaderBytes = 16 * 1024
-    var maxHeaderFields = 64
-    var maxBodyBytes = 64 * 1024
-    var maxChunkLineBytes = 1024
-    var maxTrailerBytes = 4 * 1024
-    static let standard = HTTPLimits()
+public struct HTTPLimits: Sendable {
+    public var maxHeaderBytes = 16 * 1024
+    public var maxHeaderFields = 64
+    public var maxBodyBytes = 64 * 1024
+    public var maxChunkLineBytes = 1024
+    public var maxTrailerBytes = 4 * 1024
+    public static let standard = HTTPLimits()
+
+    public init(maxHeaderBytes: Int = 16 * 1024, maxHeaderFields: Int = 64, maxBodyBytes: Int = 64 * 1024,
+                maxChunkLineBytes: Int = 1024, maxTrailerBytes: Int = 4 * 1024) {
+        self.maxHeaderBytes = maxHeaderBytes
+        self.maxHeaderFields = maxHeaderFields
+        self.maxBodyBytes = maxBodyBytes
+        self.maxChunkLineBytes = maxChunkLineBytes
+        self.maxTrailerBytes = maxTrailerBytes
+    }
 }
 
-struct HTTPRequest {
-    let method: String
-    let target: String
-    let path: String
-    let version: String
+public struct HTTPRequest: Sendable {
+    public let method: String
+    public let target: String
+    public let path: String
+    public let version: String
     /// Names lowercased, values trimmed, in arrival order.
-    let headers: [(name: String, value: String)]
-    let body: Data
+    public let headers: [(name: String, value: String)]
+    public let body: Data
 
-    func header(_ name: String) -> String? {
+    public init(method: String, target: String, path: String, version: String,
+                headers: [(name: String, value: String)], body: Data) {
+        self.method = method
+        self.target = target
+        self.path = path
+        self.version = version
+        self.headers = headers
+        self.body = body
+    }
+
+    public func header(_ name: String) -> String? {
         let name = name.lowercased()
         return headers.first { $0.name == name }?.value
     }
 
-    func headerValues(_ name: String) -> [String] {
+    public func headerValues(_ name: String) -> [String] {
         let name = name.lowercased()
         return headers.filter { $0.name == name }.map(\.value)
     }
 
     /// Comma-separated list members across every field with this name, lowercased.
-    func headerTokens(_ name: String) -> [String] { listTokens(headerValues(name)) }
+    public func headerTokens(_ name: String) -> [String] { listTokens(headerValues(name)) }
 
     /// HTTP/1.0 keep-alive is never honored: one request per 1.0 connection keeps the server simple.
-    var wantsClose: Bool { version == "HTTP/1.0" || headerTokens("connection").contains("close") }
+    public var wantsClose: Bool { version == "HTTP/1.0" || headerTokens("connection").contains("close") }
 }
 
-enum HTTPParseResult {
+public enum HTTPParseResult: Sendable {
     case needMore
     case expectContinue
     case request(HTTPRequest)
@@ -49,8 +68,8 @@ enum HTTPParseResult {
 /// (not 501). An oversize head, too many fields or oversize trailers are 431; an oversize body is
 /// 413. Decisions are made only at line and body boundaries, so results never depend on how the
 /// bytes were split across reads.
-struct HTTPParser {
-    let limits: HTTPLimits
+public struct HTTPParser: Sendable {
+    public let limits: HTTPLimits
     private var buffer: [UInt8] = []
     private var start = 0        // first unconsumed byte
     private var scan = 0         // the search for LF resumes here
@@ -77,10 +96,10 @@ struct HTTPParser {
         init(_ status: Int) { self.status = status }
     }
 
-    init(limits: HTTPLimits = .standard) { self.limits = limits }
+    public init(limits: HTTPLimits = .standard) { self.limits = limits }
 
     /// True while part of a request is buffered (header timeout rather than idle timeout).
-    var hasBufferedBytes: Bool {
+    public var hasBufferedBytes: Bool {
         switch state {
         case .failed: return false
         case .head: return head.bytes > 0 || buffer.count > start
@@ -88,7 +107,7 @@ struct HTTPParser {
         }
     }
 
-    var isReadingBody: Bool {
+    public var isReadingBody: Bool {
         switch state {
         case .head, .failed: return false
         default: return true
@@ -98,11 +117,11 @@ struct HTTPParser {
     /// Unconsumed bytes plus the body so far. Whenever `feed` returns `.needMore` this is at most
     /// `maxBodyBytes + max(maxHeaderBytes, maxTrailerBytes)`, provided the caller drains pipelined
     /// requests (empty feeds) before reading more from the socket.
-    var bufferedByteCount: Int { buffer.count - start + body.count }
+    public var bufferedByteCount: Int { buffer.count - start + body.count }
 
     /// Appends bytes and returns the next result. After `.expectContinue` (once per request) the
     /// caller writes `HTTPResponse.continueBytes` and keeps feeding. `.error` is final.
-    mutating func feed(_ bytes: Data) -> HTTPParseResult {
+    public mutating func feed(_ bytes: Data) -> HTTPParseResult {
         if case .failed(let status) = state { return .error(status: status) }
         buffer.append(contentsOf: bytes)
         do {
@@ -290,16 +309,22 @@ struct HTTPParser {
     }
 }
 
-struct HTTPResponse {
-    var status: Int
-    var headers: [(name: String, value: String)] = []
-    var body = Data()
+public struct HTTPResponse: Sendable {
+    public var status: Int
+    public var headers: [(name: String, value: String)] = []
+    public var body = Data()
 
-    static let continueBytes = Data("HTTP/1.1 100 Continue\r\n\r\n".utf8)
+    public init(status: Int, headers: [(name: String, value: String)] = [], body: Data = Data()) {
+        self.status = status
+        self.headers = headers
+        self.body = body
+    }
+
+    public static let continueBytes = Data("HTTP/1.1 100 Continue\r\n\r\n".utf8)
 
     /// Always `Content-Length`, never chunked, never CORS (§7.3). Framing and `Connection` are ours
     /// alone, and a caller field that would break the framing is dropped rather than written.
-    func serialized(close: Bool) -> Data {
+    public func serialized(close: Bool) -> Data {
         var text = "HTTP/1.1 \(status) \(Self.reason(status))\r\n"
         var names: Set<String> = []
         for (name, value) in headers {
@@ -320,7 +345,7 @@ struct HTTPResponse {
 
     private static let reserved: Set<String> = ["content-length", "transfer-encoding", "connection"]
 
-    static func reason(_ status: Int) -> String {
+    public static func reason(_ status: Int) -> String {
         switch status {
         case 100: return "Continue"
         case 200: return "OK"

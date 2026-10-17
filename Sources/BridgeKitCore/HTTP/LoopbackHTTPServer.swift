@@ -8,10 +8,10 @@ import Network
 /// without reading replies can't grow memory. Each phase has a fixed deadline
 /// that later bytes don't extend: the head within 10 s of its first byte,
 /// the body within 10 s of the head, and 30 s idle between requests.
-final class HTTPConnection: @unchecked Sendable {
+public final class HTTPConnection: @unchecked Sendable {
     fileprivate let connection: NWConnection
     private let queue: DispatchQueue
-    private var parser = HTTPParser()
+    private var parser: HTTPParser
     private var handler: LoopbackHTTPServer.Handler?
     private var pending = [HTTPRequest]()
     /// A parse error to answer once earlier requests have their replies.
@@ -19,33 +19,37 @@ final class HTTPConnection: @unchecked Sendable {
     private var busy = false
     private var receiving = false
     private var closed = false
-    private var closeHandlers = [UUID: () -> Void]()
+    private var closeHandlers = [UUID: @Sendable () -> Void]()
     private var timer: DispatchSourceTimer?
     private var phase = Phase.idle
-    fileprivate var onClose: (() -> Void)?
+    fileprivate var onClose: (@Sendable () -> Void)?
 
     private enum Phase { case idle, head, body, busy }
 
-    static let headerTimeout: TimeInterval = 10
-    static let bodyTimeout: TimeInterval = 10
-    static let idleTimeout: TimeInterval = 30
-    static let maxQueued = 4
+    public static let headerTimeout: TimeInterval = 10
+    public static let bodyTimeout: TimeInterval = 10
+    public static let idleTimeout: TimeInterval = 30
+    public static let maxQueued = 4
 
-    fileprivate init(_ connection: NWConnection, queue: DispatchQueue) {
+    fileprivate init(_ connection: NWConnection, queue: DispatchQueue, limits: HTTPLimits) {
         self.connection = connection
         self.queue = queue
+        parser = HTTPParser(limits: limits)
     }
 
     /// Runs `action` on the connection's queue when it closes (at once if it
     /// already has). A closed connection is how a client cancels a request.
     /// Call the returned closure once the action is no longer needed.
     @discardableResult
-    func whenClosed(_ action: @escaping () -> Void) -> () -> Void {
+    public func whenClosed(_ action: @escaping @Sendable () -> Void) -> @Sendable () -> Void {
         let id = UUID()
         queue.async {
             if self.closed { action() } else { self.closeHandlers[id] = action }
         }
-        return { [weak self] in self?.queue.async { self?.closeHandlers[id] = nil } }
+        return { [weak self] in
+            guard let self else { return }
+            self.queue.async { self.closeHandlers[id] = nil }
+        }
     }
 
     fileprivate func start(handler: @escaping LoopbackHTTPServer.Handler) {
@@ -137,7 +141,8 @@ final class HTTPConnection: @unchecked Sendable {
     private func write(_ response: HTTPResponse, close: Bool) {
         connection.send(content: response.serialized(close: close),
                         completion: .contentProcessed { [weak self] _ in
-            if close { self?.queue.async { self?.close() } }
+            guard close, let self else { return }
+            self.queue.async { self.close() }
         })
     }
 
@@ -192,40 +197,45 @@ final class HTTPConnection: @unchecked Sendable {
 
 /// A minimal HTTP/1.1 server bound to 127.0.0.1 only. It never binds another
 /// address: there's no setting for it, and a test checks the parameters.
-final class LoopbackHTTPServer: @unchecked Sendable {
-    typealias Handler = (HTTPRequest, HTTPConnection,
-                         @escaping (HTTPResponse, _ close: Bool) -> Void) -> Void
+public final class LoopbackHTTPServer: @unchecked Sendable {
+    public typealias Handler = @Sendable (HTTPRequest, HTTPConnection,
+                                          @escaping @Sendable (HTTPResponse, _ close: Bool) -> Void) -> Void
 
-    enum State: Equatable {
+    public enum State: Equatable, Sendable {
         case stopped
         case starting
         case ready(port: Int)
         case failed(Failure)
     }
 
-    enum Failure: Equatable {
+    public enum Failure: Equatable, Sendable {
         case portInUse(Int)
         case other(String)
     }
 
-    static let host = "127.0.0.1"
-    static let maxConnections = 32
+    public static let host = "127.0.0.1"
+    public static let defaultMaxConnections = 32
 
-    let queue = DispatchQueue(label: "mcp.http")
+    public let queue = DispatchQueue(label: "bridgekit.mcp.http")
     private let requestedPort: Int
+    private let limits: HTTPLimits
+    private let maxConnections: Int
     private let handler: Handler
     private var listener: NWListener?
     private var connections = [ObjectIdentifier: HTTPConnection]()
-    private var stateChanged: ((State) -> Void)?
+    private var stateChanged: (@Sendable (State) -> Void)?
 
-    init(port: Int, handler: @escaping Handler) {
+    public init(port: Int, limits: HTTPLimits = .standard, maxConnections: Int = defaultMaxConnections,
+                handler: @escaping Handler) {
         requestedPort = port
+        self.limits = limits
+        self.maxConnections = maxConnections
         self.handler = handler
     }
 
     /// Loopback only, on purpose: `requiredLocalEndpoint` pins the address and
     /// `acceptLocalOnly` is a second fence.
-    static func parameters(port: Int) -> NWParameters {
+    public static func parameters(port: Int) -> NWParameters {
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(
             host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: UInt16(port)) ?? .any)
@@ -235,7 +245,7 @@ final class LoopbackHTTPServer: @unchecked Sendable {
     }
 
     /// `stateChanged` is called on the main queue.
-    func start(stateChanged: @escaping (State) -> Void) {
+    public func start(stateChanged: @escaping @Sendable (State) -> Void) {
         queue.async { [self] in
             self.stateChanged = stateChanged
             report(.starting)
@@ -265,7 +275,7 @@ final class LoopbackHTTPServer: @unchecked Sendable {
     }
 
     /// Closes the listener and every connection. Safe to call more than once.
-    func stop() {
+    public func stop() {
         queue.sync {
             stateChanged = nil
             listener?.stateUpdateHandler = nil
@@ -276,11 +286,11 @@ final class LoopbackHTTPServer: @unchecked Sendable {
     }
 
     private func accept(_ raw: NWConnection) {
-        guard connections.count < Self.maxConnections else {
+        guard connections.count < maxConnections else {
             raw.cancel()
             return
         }
-        let connection = HTTPConnection(raw, queue: queue)
+        let connection = HTTPConnection(raw, queue: queue, limits: limits)
         let key = ObjectIdentifier(connection)
         connections[key] = connection
         connection.onClose = { [weak self] in self?.connections[key] = nil }
@@ -305,8 +315,8 @@ final class LoopbackHTTPServer: @unchecked Sendable {
 
 /// Whether 127.0.0.1:port can be bound now, for the port sheet. Uses the
 /// same address reuse as the listener, so a port in TIME_WAIT counts as free.
-enum PortProbe {
-    static func isFree(_ port: Int) -> Bool {
+public enum PortProbe {
+    public static func isFree(_ port: Int) -> Bool {
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else { return false }
         defer { close(fd) }
