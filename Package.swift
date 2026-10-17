@@ -13,7 +13,7 @@ let package = Package(
                     resources: [.copy("fixtures")]),
         // The reference server the Python harness talks to (Tests/harness).
         .executableTarget(name: "bridgekit-reference-server", dependencies: ["BridgeKitCore"],
-                          path: "Tests/harness/ReferenceServer"),
+                          path: "Tests/harness/ReferenceServer", resources: [.copy("tools.json")]),
         .executableTarget(name: "bridgekit-reference-launcher", dependencies: ["BridgeKitCore"],
                           path: "Tests/harness/ReferenceLauncher"),
     ]

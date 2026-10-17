@@ -244,7 +244,7 @@ public final class LoopbackHTTPServer: @unchecked Sendable {
         return parameters
     }
 
-    /// `stateChanged` is called on the main queue.
+    /// `stateChanged` is called on the server's queue.
     public func start(stateChanged: @escaping @Sendable (State) -> Void) {
         queue.async { [self] in
             self.stateChanged = stateChanged
@@ -303,8 +303,7 @@ public final class LoopbackHTTPServer: @unchecked Sendable {
     }
 
     private func report(_ state: State) {
-        let callback = stateChanged
-        DispatchQueue.main.async { callback?(state) }
+        stateChanged?(state)
     }
 
     private static func failure(_ error: Error, port: Int) -> Failure {

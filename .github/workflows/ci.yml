@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Swift version
+        run: swift --version
+      - name: Unit tests and reference harness
+        run: sh scripts/test.sh
+      - name: Universal release build
+        run: swift build -c release --product BridgeKitCore --arch arm64 --arch x86_64

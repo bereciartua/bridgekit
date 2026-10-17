@@ -1,0 +1,44 @@
+{
+  "$comment": "The reference server's contract. Tests/harness/mcp_test.py compares tools/list with it.",
+  "serverInstructions": "A reference MCP server for BridgeKitCore's tests. Call status to see whether it's on, echo to read text back, and write_note to make a change the user may have to approve.",
+  "$defs": {
+    "$comment": "Shared fragments, inlined into each tool's definition.",
+    "note": {"type": "string", "minLength": 1, "maxLength": 200, "description": "The note's text. Starting it with \"slow\" makes the write take 2 seconds."}
+  },
+  "tools": [
+    {
+      "name": "status",
+      "title": "Status",
+      "description": "Whether the reference server is on. Always visible.",
+      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
+      "annotations": {"readOnlyHint": true}
+    },
+    {
+      "name": "echo",
+      "title": "Echo",
+      "description": "Returns the text you send. delay_ms waits first, for timeout and cancellation tests.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "text": {"type": "string", "minLength": 1, "maxLength": 200},
+          "delay_ms": {"type": "integer", "minimum": 0, "maximum": 120000}
+        },
+        "required": ["text"],
+        "additionalProperties": false
+      },
+      "annotations": {"readOnlyHint": true}
+    },
+    {
+      "name": "write_note",
+      "title": "Write a note",
+      "description": "Writes a note. Agents set up to ask need the user's approval first.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {"note": {"$ref": "#/$defs/note"}},
+        "required": ["note"],
+        "additionalProperties": false
+      },
+      "annotations": {"readOnlyHint": false, "destructiveHint": false}
+    }
+  ]
+}

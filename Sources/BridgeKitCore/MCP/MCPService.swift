@@ -58,7 +58,7 @@ public final class MCPService {
         self.listener = listener
         status = .starting
         listener.start { [weak self] state in
-            MainActor.assumeIsolated {
+            Task { @MainActor in
                 guard let self, self.generation == current else { return }
                 self.listenerChanged(state)
             }
@@ -80,11 +80,10 @@ public final class MCPService {
             if wasListening, !retried, failure != .portInUse(requestedPort) {
                 retried = true
                 status = .starting
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-                    MainActor.assumeIsolated {
-                        guard let self, self.status == .starting, self.listener == nil else { return }
-                        self.listen()
-                    }
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    guard let self, self.status == .starting, self.listener == nil else { return }
+                    self.listen()
                 }
             } else {
                 status = .failed(failure)
@@ -129,15 +128,15 @@ public final class MCPService {
             case .proceed(let presented):
                 key = presented
             }
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    server.value.handle(request, key: key, whenClosed: { action in
-                        let action = UncheckedBox(action)
-                        return connection.whenClosed {
-                            DispatchQueue.main.async { MainActor.assumeIsolated { action.value() } }
-                        }
-                    }, reply: { send($0.response, $0.close) })
-                }
+            // A Task rather than DispatchQueue.main: hosts that drain the main
+            // queue with dispatchMain() run it off the main thread.
+            Task { @MainActor in
+                server.value.handle(request, key: key, whenClosed: { action in
+                    let action = UncheckedBox(action)
+                    return connection.whenClosed {
+                        Task { @MainActor in action.value() }
+                    }
+                }, reply: { send($0.response, $0.close) })
             }
         }
     }
