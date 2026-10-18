@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.1 (unreleased)
+## 0.1.1
 
 - JSON-RPC ids are capped at 1,024 bytes as a response writes them (quotes and escapes included),
   so an app can budget a response exactly instead of reserving room for an id as long as the
