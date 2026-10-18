@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.2.0 (unreleased)
+
+- New product, `BridgeKitRemote`: EK Bridge's Remote Access tier, moved from EK Bridge at
+  e753b22 (0.11.2 plus BridgeKit 0.1.1) with its tests. The Remote Access listener, its HTTP
+  gate and health nonces; the OAuth 2.1 authorization server, its store
+  (`remote-connections.json`, unchanged format) and sign-in pages; the client-metadata fetch;
+  the tunnel checks, parsers and Switch Tunnel state; the reachability test and `KeepAwake`.
+- Apps configure it with `RemoteBridgeConfiguration`: the default port, the remote-token,
+  access, refresh and client-secret prefixes, the OAuth scope, the client-metadata `User-Agent`
+  and the store's folder, and `RemoteTexts` for 401s and the sign-in pages
+  (`RemoteTexts.standard(displayName:agent:)` gives EK Bridge's words with `agent: "client"`).
+- `RemoteAuthenticator` is the app's side: a remote token to an agent, whether an OAuth agent
+  still has cloud access, and its name.
+- Tunnel status, the reachability test's failures (`RemoteProbeFailure`) and `TunnelProvider`
+  are typed; the words, commands and steps for each tunnel stay in the app. The health route
+  reports the tunnel by `TunnelProvider.wireName`, as before.
+- `CIMDFetcher` takes the `User-Agent` and an explicit `CIMDFetcher.Testing` value for a local
+  HTTPS fixture, instead of EK Bridge's compile-time test flag.
+- The reference server gains the remote listener and a fake sign-in approver;
+  `Tests/harness/remote_test.py` (from EK Bridge's `run_remote` and `run_oauth`) drives it.
+- BridgeKitCore is unchanged.
+
 ## 0.1.1
 
 - JSON-RPC ids are capped at 1,024 bytes as a response writes them (quotes and escapes included),

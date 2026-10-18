@@ -26,4 +26,6 @@ jobs:
       - name: Unit tests and reference harness
         run: sh scripts/test.sh
       - name: Universal release build
-        run: swift build -c release --product BridgeKitCore --arch arm64 --arch x86_64
+        run: |
+          swift build -c release --product BridgeKitCore --arch arm64 --arch x86_64
+          swift build -c release --product BridgeKitRemote --arch arm64 --arch x86_64
