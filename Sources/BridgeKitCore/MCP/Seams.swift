@@ -82,6 +82,10 @@ public struct BridgeConfiguration: Sendable {
     public var forwardedHeaderPrefixes: [String]
     /// What the contract's `minLength`/`maxLength` count.
     public var stringLength: JSONSchemaValidator.StringLength
+    /// The longest JSON-RPC id accepted, in encoded bytes. Longer ones get an
+    /// invalid-request error with id null, so a response never carries more
+    /// than this for its id.
+    public var maxIDBytes: Int
     public var texts: BridgeTexts
 
     public init(identity: BridgeIdentity, mcpPort: Int, keyPrefix: String, serverKey: String,
@@ -91,7 +95,7 @@ public struct BridgeConfiguration: Sendable {
                 toolCallTimeout: TimeInterval = 55, allowedOrigins: Set<String> = [],
                 forwardedHeaders: [String] = MCPHTTPGate.defaultForwardedHeaders,
                 forwardedHeaderPrefixes: [String] = [], stringLength: JSONSchemaValidator.StringLength = .utf8Bytes,
-                texts: BridgeTexts? = nil) {
+                maxIDBytes: Int = JSONRPC.defaultMaxIDBytes, texts: BridgeTexts? = nil) {
         self.identity = identity
         self.mcpPort = mcpPort
         self.keyPrefix = keyPrefix
@@ -107,6 +111,7 @@ public struct BridgeConfiguration: Sendable {
         self.forwardedHeaders = forwardedHeaders
         self.forwardedHeaderPrefixes = forwardedHeaderPrefixes
         self.stringLength = stringLength
+        self.maxIDBytes = maxIDBytes
         self.texts = texts ?? .standard(displayName: identity.displayName)
     }
 }
@@ -182,6 +187,9 @@ public struct ToolDefinition: @unchecked Sendable, BridgeOperation {
 
 /// A validated `tools/call`.
 public struct ToolCall: @unchecked Sendable {
+    /// The request's id, echoed in the response: `id.encodedByteCount` bytes,
+    /// at most `BridgeConfiguration.maxIDBytes`.
+    public let id: JSONRPCID
     public let name: String
     /// Checked against the tool's input schema before the handler sees them.
     public let arguments: [String: Any]
@@ -193,8 +201,10 @@ public struct ToolCall: @unchecked Sendable {
     /// Cancellation, and what a timeout means for this call.
     public let context: CallContext
 
-    public init(name: String, arguments: [String: Any], agent: AuthenticatedAgent, agentName: String?,
-                remote: Bool, context: CallContext) {
+    /// `id` defaults to 0 for calls built by hand, in tests.
+    public init(id: JSONRPCID = .int(0), name: String, arguments: [String: Any], agent: AuthenticatedAgent,
+                agentName: String?, remote: Bool, context: CallContext) {
+        self.id = id
         self.name = name
         self.arguments = arguments
         self.agent = agent

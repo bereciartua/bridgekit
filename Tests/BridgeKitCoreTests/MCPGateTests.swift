@@ -350,6 +350,61 @@ struct MCPGateTests {
         #expect(echoed.contains(#""id":9007199254740993"#))
     }
 
+    static func parsed(id: Any, maxIDBytes: Int = JSONRPC.defaultMaxIDBytes, jsonrpc: String = "2.0") -> Parsed {
+        let body = JSONRPC.encode(["jsonrpc": jsonrpc, "id": id, "method": "ping"])
+        switch JSONRPC.parse(body, maxIDBytes: maxIDBytes) {
+        case .success(.request(let id, let method, let params)): return .request(id, method, params.count)
+        case .success(.notification(let method, _)): return .notification(method)
+        case .success(.response): return .response
+        case .failure(let error): return .failure(error)
+        }
+    }
+
+    @Test("Request ids are capped by their encoded length")
+    func requestIDCap() {
+        #expect(JSONRPC.defaultMaxIDBytes == 1_024)
+        #expect(Self.configuration().maxIDBytes == 1_024)
+        // At the cap: 1,022 characters and two quotes.
+        let atCap = String(repeating: "x", count: 1_022)
+        #expect(Self.parsed(id: atCap) == .request(.string(atCap), "ping", 0))
+        #expect(Self.parsed(id: atCap + "x") == .failure(.idTooLong))
+        // Escapes and UTF-8 count as written: a quote is 2 bytes, é is 2, 🙂 is 4, U+0001 is 6.
+        for (unit, count) in [("\"", 511), ("é", 511), ("🙂", 255), ("\n", 511), ("\u{1}", 170)] {
+            let fits = String(repeating: unit, count: count)
+            #expect(Self.parsed(id: fits) == .request(.string(fits), "ping", 0), "\(unit.debugDescription)")
+            #expect(Self.parsed(id: fits + unit) == .failure(.idTooLong), "\(unit.debugDescription)")
+        }
+        // Over the cap is refused before any error that would echo the id.
+        #expect(Self.parsed(id: atCap + "x", jsonrpc: "1.0") == .failure(.idTooLong))
+        #expect(Self.parsed(id: atCap, jsonrpc: "1.0") == .failure(.invalidRequestWithID(.string(atCap))))
+        let response = JSONRPC.encode(["jsonrpc": "2.0", "id": atCap + "x", "result": [String: Any]()])
+        #expect(Self.parsed(String(decoding: response, as: UTF8.self)) == .failure(.idTooLong))
+        // Integer ids are at most 20 bytes, far under the cap.
+        #expect(JSONRPCID.int(Int.min).encodedByteCount == 20)
+        #expect(JSONRPCID.int(Int.max).encodedByteCount == 19)
+        #expect(JSONRPCID.int(0).encodedByteCount == 1)
+        #expect(Self.parsed(id: NSNumber(value: Int.min)) == .request(.int(Int.min), "ping", 0))
+        // A smaller configured cap applies to both kinds.
+        #expect(Self.parsed(id: "ab", maxIDBytes: 4) == .request(.string("ab"), "ping", 0))
+        #expect(Self.parsed(id: "abc", maxIDBytes: 4) == .failure(.idTooLong))
+        #expect(Self.parsed(id: 1_234, maxIDBytes: 4) == .request(.int(1_234), "ping", 0))
+        #expect(Self.parsed(id: 12_345, maxIDBytes: 4) == .failure(.idTooLong))
+    }
+
+    @Test("encodedByteCount is what a response spends on the id")
+    func encodedIDLength() {
+        let result = JSONRPC.result(id: .int(0), [:]).count - 1
+        let error = JSONRPC.error(id: .int(0), code: -32600, message: "m").count - 1
+        let ids: [JSONRPCID] = [.string(""), .string("abc"), .string("a/b"), .string("\"\\"), .string("\u{0}\u{1f}\t"),
+                                .string("\u{7f}\u{2028}é🙂"), .string(String(repeating: "x", count: 1_022)),
+                                .int(0), .int(-7), .int(Int.max), .int(Int.min)]
+        for id in ids {
+            #expect(JSONRPC.result(id: id, [:]).count == result + id.encodedByteCount, "\(id)")
+            #expect(JSONRPC.error(id: id, code: -32600, message: "m").count == error + id.encodedByteCount, "\(id)")
+        }
+        #expect(JSONRPCID.string("a\"b").encodedByteCount == 6)
+    }
+
     // MARK: Mcp-Name and clientInfo
 
     @Test("Mcp-Name base64 and agent names")

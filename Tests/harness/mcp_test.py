@@ -355,6 +355,7 @@ def run_core(h, catalog, contract):
     check("batch rejected", status == 400 and body["error"]["code"] == -32600 and body["id"] is None, body)
     status, _, body, _ = c.raw(body=b"{nope")
     check("parse error", status == 400 and body["error"]["code"] == -32700, body)
+    run_id_cap(c, h)
     status, _, _, data = c.raw(body={"jsonrpc": "2.0", "id": 1, "result": {}})
     check("client response 202", status == 202 and data == b"", status)
     m.close()
@@ -362,6 +363,33 @@ def run_core(h, catalog, contract):
     run_http_statuses(h)
     run_concurrency(h)
     c.close()
+
+
+def run_id_cap(c, h):
+    # Ids are capped at 1,024 bytes as the response writes them, so an app
+    # can budget exactly; the call carries its id.
+    def echo(rid):
+        message = {"jsonrpc": "2.0", "id": rid, "method": "tools/call",
+                   "params": {"name": "echo", "arguments": {"text": "id"}}}
+        status, _, body, _ = c.raw(body=message, headers={"MCP-Protocol-Version": LEGACY})
+        return status, body
+    for rid, size in [("x" * 1022, 1024), ('"' * 511, 1024), ("é" * 511, 1024), ("🙂" * 255, 1022)]:
+        status, body = echo(rid)
+        check("id at the cap", status == 200 and body["id"] == rid and body["result"]["isError"] is False,
+              (status, len(rid)))
+        row = h.activity()[0]
+        check("call carries its id", row.get("id") == rid and row.get("idBytes") == size, row.get("idBytes"))
+    for rid in ["x" * 1023, '"' * 512, "é" * 512, "🙂" * 256, "x" * 60000]:
+        status, body = echo(rid)
+        check("id over the cap", status == 400 and body["id"] is None and body["error"]["code"] == -32600 and
+              "1024 bytes" in body["error"]["message"] and "result" not in body, (status, len(rid)))
+    status, _, body, _ = c.raw(body={"jsonrpc": "1.0", "id": "x" * 1023, "method": "ping"})
+    check("over-cap id not echoed in other errors", status == 400 and body["id"] is None, body)
+    for rid, size in [(2**63 - 1, 19), (-2**63, 20), (0, 1)]:
+        status, body = echo(rid)
+        row = h.activity()[0]
+        check("integer id unaffected", status == 200 and body["id"] == rid and isinstance(body["id"], int) and
+              row.get("id") == rid and row.get("idBytes") == size, (body, row))
 
 
 def run_http_statuses(h):

@@ -245,7 +245,7 @@ public final class MCPServer {
         }
         let remote = auth.remote
         let message: JSONRPCMessage
-        switch JSONRPC.parse(request.body) {
+        switch JSONRPC.parse(request.body, maxIDBytes: configuration.maxIDBytes) {
         case .success(let parsed): message = parsed
         case .failure(.parse):
             reply(error(400, nil, JSONRPC.parseError, "Parse error: the body isn't valid JSON."))
@@ -256,6 +256,10 @@ public final class MCPServer {
         case .failure(.invalidRequest):
             reply(error(400, nil, JSONRPC.invalidRequest,
                         "Invalid request: send one JSON-RPC 2.0 object (batches aren't supported)."))
+            return
+        case .failure(.idTooLong):
+            reply(error(400, nil, JSONRPC.invalidRequest,
+                        "Invalid request: the id is longer than \(configuration.maxIDBytes) bytes."))
             return
         }
         let id: JSONRPCID?
@@ -413,7 +417,7 @@ public final class MCPServer {
             return
         }
         let context = CallContext()
-        let call = ToolCall(name: name, arguments: arguments, agent: agent, agentName: agentName,
+        let call = ToolCall(id: id, name: name, arguments: arguments, agent: agent, agentName: agentName,
                             remote: remote, context: context)
         let pending = PendingCall()
         let key = agent.id + "|" + id.key
