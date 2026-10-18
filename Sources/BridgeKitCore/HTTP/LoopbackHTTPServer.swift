@@ -4,10 +4,12 @@ import Network
 
 /// One accepted connection. Requests on it are answered strictly in order.
 ///
-/// Reading pauses while `maxQueued` requests wait, so a client that pipelines
-/// without reading replies can't grow memory. Each phase has a fixed deadline
-/// that later bytes don't extend: the head within 10 s of its first byte,
-/// the body within 10 s of the head, and 30 s idle between requests.
+/// Reading pauses while `maxQueued` requests wait, until the parser has used
+/// what it holds, and until the network stack has taken the last reply, so a
+/// client that pipelines without reading replies can't grow memory. Each phase
+/// has a fixed deadline that later bytes don't extend: the head within 10 s of
+/// its first byte, the body within 10 s of the head, a reply taken within
+/// 30 s, and 30 s idle between requests.
 public final class HTTPConnection: @unchecked Sendable {
     fileprivate let connection: NWConnection
     private let queue: DispatchQueue
@@ -18,17 +20,22 @@ public final class HTTPConnection: @unchecked Sendable {
     private var failure: Int?
     private var busy = false
     private var receiving = false
+    /// The parser has asked for more bytes. Reading before then would buffer
+    /// bytes behind pipelined requests not parsed yet, without limit.
+    private var drained = true
     private var closed = false
     private var closeHandlers = [UUID: @Sendable () -> Void]()
     private var timer: DispatchSourceTimer?
     private var phase = Phase.idle
     fileprivate var onClose: (@Sendable () -> Void)?
 
-    private enum Phase { case idle, head, body, busy }
+    private enum Phase { case idle, head, body, busy, writing }
 
     public static let headerTimeout: TimeInterval = 10
     public static let bodyTimeout: TimeInterval = 10
     public static let idleTimeout: TimeInterval = 30
+    /// A client that doesn't read its replies is closed after this.
+    public static let writeTimeout: TimeInterval = 30
     public static let maxQueued = 4
 
     fileprivate init(_ connection: NWConnection, queue: DispatchQueue, limits: HTTPLimits) {
@@ -66,7 +73,7 @@ public final class HTTPConnection: @unchecked Sendable {
     }
 
     private func receive() {
-        guard !closed, !receiving, failure == nil, pending.count < Self.maxQueued else { return }
+        guard !closed, !receiving, drained, failure == nil, pending.count < Self.maxQueued else { return }
         receiving = true
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) {
             [weak self] data, _, isComplete, error in
@@ -85,11 +92,13 @@ public final class HTTPConnection: @unchecked Sendable {
     /// the queue is full; the rest stays buffered in the parser until then.
     private func parse(_ data: Data) {
         var input = data
+        drained = false
         while !closed && failure == nil && pending.count < Self.maxQueued {
             let result = parser.feed(input)
             input = Data()
             switch result {
             case .needMore:
+                drained = true
                 updatePhase()
                 return
             case .expectContinue:
@@ -126,23 +135,28 @@ public final class HTTPConnection: @unchecked Sendable {
             guard let self else { return }
             self.queue.async {
                 guard !self.closed else { return }
-                self.busy = false
                 let closing = close || request.wantsClose
-                self.write(response, close: closing)
-                guard !closing else { return }
-                // Requests already buffered first, then more reading.
-                self.parse(Data())
-                self.next()
-                self.receive()
+                // Still busy until the stack takes the reply.
+                self.setPhase(.writing)
+                self.write(response, close: closing) {
+                    self.busy = false
+                    // Requests already buffered first, then more reading.
+                    self.parse(Data())
+                    self.next()
+                    self.receive()
+                }
             }
         }
     }
 
-    private func write(_ response: HTTPResponse, close: Bool) {
+    /// `then` runs on the queue once the stack has taken the reply, unless it closes.
+    private func write(_ response: HTTPResponse, close: Bool, then: (@Sendable () -> Void)? = nil) {
         connection.send(content: response.serialized(close: close),
                         completion: .contentProcessed { [weak self] _ in
-            guard close, let self else { return }
-            self.queue.async { self.close() }
+            guard let self else { return }
+            self.queue.async {
+                if close { self.close() } else if !self.closed { then?() }
+            }
         })
     }
 
@@ -162,6 +176,7 @@ public final class HTTPConnection: @unchecked Sendable {
         let limit: TimeInterval
         switch next {
         case .busy: return
+        case .writing: limit = Self.writeTimeout
         case .idle: limit = Self.idleTimeout
         case .head: limit = Self.headerTimeout
         case .body: limit = Self.bodyTimeout
@@ -169,8 +184,8 @@ public final class HTTPConnection: @unchecked Sendable {
         let source = DispatchSource.makeTimerSource(queue: queue)
         source.schedule(deadline: .now() + limit)
         source.setEventHandler { [weak self] in
-            guard let self, !self.busy, !self.closed else { return }
-            if self.phase == .idle {
+            guard let self, !self.closed, !self.busy || self.phase == .writing else { return }
+            if self.phase == .idle || self.phase == .writing {
                 self.close()
             } else {
                 self.write(HTTPResponse(status: 408), close: true)

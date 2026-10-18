@@ -15,6 +15,12 @@
   compile.
 - `JSONRPCParseError` has a new case, `.idTooLong`. An exhaustive `switch` over it needs the case;
   neither EK Bridge nor Funes has one.
+- A client that pipelines requests without reading the replies can no longer make the server
+  buffer them without limit. On macOS 15 a flood of unread 404s grew the server by 215 MB in
+  3 s. `HTTPConnection` now reads more only after the parser has used what it holds, and starts
+  the next request only once the network stack has taken the last reply. A reply the stack
+  hasn't taken within 30 s closes the connection (`HTTPConnection.writeTimeout`). This was
+  present in 0.1.0 and in EK Bridge 0.11.2, where the code came from.
 
 ## 0.1.0
 

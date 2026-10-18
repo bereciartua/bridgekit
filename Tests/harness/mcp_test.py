@@ -483,23 +483,41 @@ def rss_kb(pid):
 
 
 def run_hardening(h):
-    # A client that pipelines without reading replies can't grow memory:
-    # the server stops reading while a few requests wait.
+    # A client that pipelines without reading replies can't grow memory: the
+    # server stops reading once its replies back up, and closes the connection
+    # when the stack hasn't taken a reply in 30 s.
     before = rss_kb(h.proc.pid)
-    raw = socket.create_connection(("127.0.0.1", h.port))
-    raw.setblocking(False)
+    flood = socket.create_connection(("127.0.0.1", h.port))
+    flood.setblocking(False)
     chunk = b"GET /x HTTP/1.1\r\nHost: a\r\n\r\n" * 2000
-    sent, deadline = 0, time.time() + 3
-    while time.time() < deadline:
+    sent, dropped = 0, False
+    started = progressed = time.time()
+    # Pour until the server stops reading (no progress for 1.5 s), for at most 10 s.
+    while time.time() - progressed < 1.5 and time.time() - started < 10:
         try:
-            sent += raw.send(chunk)
+            # Resume mid-chunk after a partial send, so every request is well-formed.
+            sent += flood.send(chunk[sent % len(chunk):])
+            progressed = time.time()
         except BlockingIOError:
             time.sleep(0.01)
         except (BrokenPipeError, ConnectionResetError):
-            break  # The server may drop a client that floods it; also bounded.
+            dropped = True
+            break
+    # The server answers what the socket buffers hold, then stalls: its count
+    # stops. TCP's first zero-window probe (about 5 s in) can let a few more
+    # replies through, so the count must hold for 6 s.
+    answered, stalled = h.control(cmd="counters")["requests"], time.time()
+    while time.time() - stalled < 6 and time.time() - started < 40:
+        time.sleep(0.25)
+        now = h.control(cmd="counters")["requests"]
+        if now != answered:
+            answered, stalled = now, time.time()
     grown = rss_kb(h.proc.pid) - before
-    raw.close()
-    check("pipelined flood is bounded", grown < 50_000, f"sent {sent} bytes, RSS grew {grown} KB")
+    detail = f"sent {sent} bytes in {progressed - started:.1f} s, stalled after {stalled - started:.1f} s, " \
+             f"RSS grew {grown} KB"
+    check("well-formed flood isn't dropped", not dropped, detail)
+    check("pipelined flood stops being read", progressed - started < 8.5 and stalled - started < 34, detail)
+    check("pipelined flood is bounded", grown < 50_000, detail)
     # A trickle of one byte every 3 s doesn't extend the 10 s header deadline.
     raw = socket.create_connection(("127.0.0.1", h.port))
     started = time.time()
@@ -550,6 +568,22 @@ def run_hardening(h):
         owner = json.load(f)["pid"]
     check("second instance keeps the endpoint file", second.returncode != 0 and owner == h.proc.pid,
           (second.returncode, owner))
+    # The flood's client never read: the write deadline closes it 30 s after
+    # the server stalled.
+    time.sleep(max(0.0, stalled + 33 - time.time()))
+    flood.setblocking(True)
+    flood.settimeout(5)
+    closed = False
+    try:
+        while flood.recv(1 << 20):
+            pass
+        closed = True
+    except ConnectionResetError:
+        closed = True
+    except socket.timeout:
+        pass
+    check("non-reading client closed after 30 s", closed, round(time.time() - stalled, 1))
+    flood.close()
 
 
 def run_concurrency(h):
