@@ -1,38 +1,64 @@
+import BridgeKitCore
 import CryptoKit
 import Foundation
 
 /// A cloud app's authorization request waiting for the user's answer in the app.
-struct PairingRequest: Identifiable, Equatable {
-    let id: UUID
-    /// The bridge client the pairing window was opened for.
-    let clientID: String
+public struct PairingRequest: Identifiable, Equatable, Sendable {
+    public let id: UUID
+    /// The app's agent the pairing window was opened for.
+    public let clientID: String
     /// Self-reported by the app (CIMD or DCR `client_name`), sanitized. Display only.
-    let appName: String
+    public let appName: String
     /// The CIMD URL, which the app's server proved it controls. Nil for DCR clients.
-    let appURL: String?
+    public let appURL: String?
     /// Where the browser returns, so the user can spot a look-alike app.
-    let redirectHost: String
+    public let redirectHost: String
     /// "482 913": shown both in the browser and on the Mac.
-    let code: String
-    let expiresAt: Date
+    public let code: String
+    public let expiresAt: Date
+
+    public init(id: UUID, clientID: String, appName: String, appURL: String?, redirectHost: String, code: String,
+                expiresAt: Date) {
+        self.id = id
+        self.clientID = clientID
+        self.appName = appName
+        self.appURL = appURL
+        self.redirectHost = redirectHost
+        self.code = code
+        self.expiresAt = expiresAt
+    }
 }
 
-struct OAuthConnectionView: Identifiable, Equatable {
-    let id: UUID
-    let clientID: String
-    let appName: String
-    let createdAt: Date
-    let lastUsedAt: Date?
+public struct OAuthConnectionView: Identifiable, Equatable, Sendable {
+    public let id: UUID
+    /// The app's agent whose access the cloud app uses.
+    public let clientID: String
+    public let appName: String
+    public let createdAt: Date
+    public let lastUsedAt: Date?
+
+    public init(id: UUID, clientID: String, appName: String, createdAt: Date, lastUsedAt: Date?) {
+        self.id = id
+        self.clientID = clientID
+        self.appName = appName
+        self.createdAt = createdAt
+        self.lastUsedAt = lastUsedAt
+    }
 }
 
-struct OAuthContext {
-    let publicOrigin: String
+public struct OAuthContext: Sendable {
+    public let publicOrigin: String
     /// "/r/<secret>"; everything OAuth lives behind it, so scanners of the bare host learn nothing.
-    let secretPrefix: String
+    public let secretPrefix: String
 
-    var issuer: String { publicOrigin + secretPrefix }
-    var resource: String { issuer + "/mcp" }
-    var resourceMetadataURL: String {
+    public init(publicOrigin: String, secretPrefix: String) {
+        self.publicOrigin = publicOrigin
+        self.secretPrefix = secretPrefix
+    }
+
+    public var issuer: String { publicOrigin + secretPrefix }
+    public var resource: String { issuer + "/mcp" }
+    public var resourceMetadataURL: String {
         publicOrigin + "/.well-known/oauth-protected-resource" + secretPrefix + "/mcp"
     }
 }
@@ -42,11 +68,8 @@ struct OAuthContext {
 /// rotating refresh tokens with reuse detection, CIMD clients with a DCR fallback, and revocation.
 /// Every endpoint answers at once; only the browser page waits for the user.
 @MainActor
-final class OAuthServer {
-    static let scope = "calendar"
-    nonisolated static let accessPrefix = "ekb_oat_v1_"
-    static let refreshPrefix = "ekb_ort_v1_"
-    static let pairingDuration: TimeInterval = 10 * 60
+public final class OAuthServer {
+    public static let pairingDuration: TimeInterval = 10 * 60
     static let requestLifetime: TimeInterval = 5 * 60
     static let codeLifetime: TimeInterval = 60
     static let accessLifetime: TimeInterval = 60 * 60
@@ -57,13 +80,22 @@ final class OAuthServer {
     /// A client whose token response got lost in the tunnel may retry with the refresh token it
     /// just used, within this time and only if nothing used the new tokens yet.
     static let refreshRetryGrace: TimeInterval = 30
-    static let secretPrefix = "ekb_ocs_v1_"
 
-    var pairingRequested: (PairingRequest) -> Void = { _ in }
-    var pairingChanged: () -> Void = {}
-    var connectionsChanged: (String) -> Void = { _ in }
+    /// From the configuration: "memory", "fns_oat_v1_", …
+    public let scope: String
+    public let accessPrefix: String
+    public let refreshPrefix: String
+    public let secretPrefix: String
+
+    public var pairingRequested: (PairingRequest) -> Void = { _ in }
+    public var pairingChanged: () -> Void = {}
+    /// The agent whose connected apps changed.
+    public var connectionsChanged: (String) -> Void = { _ in }
 
     private let store: OAuthStore
+    private let pages: OAuthPages
+    private let texts: RemoteTexts
+    private let displayName: String
     private let fetcher: CIMDFetching
     private let now: () -> Date
     private let clientAllowed: (String) -> Bool
@@ -110,12 +142,25 @@ final class OAuthServer {
     private var spentCodes: [String: (connection: UUID?, forgetAt: Date)] = [:]
     private var lastUsePersist: Date?
 
-    init(directory: URL, fetcher: CIMDFetching, now: @escaping () -> Date = Date.init,
-         clientAllowed: @escaping (String) -> Bool, clientName: @escaping (String) -> String?,
-         schedule: @escaping (TimeInterval, @escaping @MainActor () -> Void) -> Void = { delay, action in
-             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { MainActor.assumeIsolated(action) }
-         }) {
-        store = OAuthStore(directory: directory)
+    /// `agentAllowed` and `agentName` are the app's: whether an agent may use Remote Access now,
+    /// and its name for the code page. The store lives in `configuration.storeDirectory`.
+    public init(configuration: RemoteBridgeConfiguration, fetcher: CIMDFetching, now: @escaping () -> Date = Date.init,
+                agentAllowed clientAllowed: @escaping (String) -> Bool,
+                agentName clientName: @escaping (String) -> String?,
+                schedule: @escaping (TimeInterval, @escaping @MainActor () -> Void) -> Void = { delay, action in
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .seconds(delay), tolerance: .milliseconds(100))
+                        action()
+                    }
+                }) {
+        store = OAuthStore(directory: configuration.storeDirectory)
+        scope = configuration.scope
+        accessPrefix = configuration.accessTokenPrefix
+        refreshPrefix = configuration.refreshTokenPrefix
+        secretPrefix = configuration.clientSecretPrefix
+        texts = configuration.texts
+        displayName = configuration.identity.displayName
+        pages = OAuthPages(app: configuration.identity.displayName, texts: configuration.texts)
         self.fetcher = fetcher
         self.now = now
         self.clientAllowed = clientAllowed
@@ -123,14 +168,24 @@ final class OAuthServer {
         self.schedule = schedule
     }
 
-    var isAvailable: Bool { store.isAvailable }
+    /// Asks `authenticator` (held weakly) whether an agent may be used and what it's called.
+    public convenience init(configuration: RemoteBridgeConfiguration, fetcher: CIMDFetching,
+                            authenticator: RemoteAuthenticator, now: @escaping () -> Date = Date.init) {
+        self.init(configuration: configuration, fetcher: fetcher, now: now,
+                  agentAllowed: { [weak authenticator] in authenticator?.cloudAccessAllowed(agentID: $0) ?? false },
+                  agentName: { [weak authenticator] in authenticator?.agentName(agentID: $0) })
+    }
+
+    /// False once `remote-connections.json` couldn't be read or written: nothing is accepted.
+    public var isAvailable: Bool { store.isAvailable }
 
     // MARK: Pairing window
 
-    var pairingClientID: String? { liveWindow?.clientID }
-    var pairingExpiresAt: Date? { liveWindow?.expiresAt }
+    /// The agent pairing is open for, while a window is open.
+    public var pairingClientID: String? { liveWindow?.clientID }
+    public var pairingExpiresAt: Date? { liveWindow?.expiresAt }
 
-    var pendingPairings: [PairingRequest] {
+    public var pendingPairings: [PairingRequest] {
         let time = now()
         guard let window = liveWindow else { return [] }
         return pairings
@@ -143,8 +198,8 @@ final class OAuthServer {
         return window
     }
 
-    /// Opens the 10-minute window for one bridge client, replacing any other window.
-    func openPairing(clientID: String) {
+    /// Opens the 10-minute window for one agent, replacing any other window.
+    public func openPairing(clientID: String) {
         sweep()
         pairings.removeAll { $0.redirect == nil }
         let opened = Window(clientID: clientID, expiresAt: now().addingTimeInterval(Self.pairingDuration))
@@ -153,7 +208,7 @@ final class OAuthServer {
         pairingChanged()
     }
 
-    func closePairing() {
+    public func closePairing() {
         sweep()
         guard window != nil || pairings.contains(where: { $0.redirect == nil }) else { return }
         window = nil
@@ -163,7 +218,7 @@ final class OAuthServer {
 
     /// Allow mints a code and closes the window (one connection per window); Deny sends
     /// `access_denied` back to the app.
-    func answerPairing(_ id: UUID, allow: Bool) {
+    public func answerPairing(_ id: UUID, allow: Bool) {
         sweep()
         guard let index = pairings.firstIndex(where: { $0.request.id == id && $0.redirect == nil }),
               let window = liveWindow, pairings[index].windowID == window.id else { return }
@@ -180,7 +235,7 @@ final class OAuthServer {
         } else {
             pairings[index].redirect = Self.redirect(pairing.authorization, [
                 "error": "access_denied",
-                "error_description": "The connection was declined in \(AppIdentity.displayName).",
+                "error_description": texts.declined,
             ])
         }
         pairings[index].retainUntil = time.addingTimeInterval(Self.codeLifetime)
@@ -221,8 +276,8 @@ final class OAuthServer {
     }
 
     /// Handles OAuth and metadata routes. Returns false (and never calls reply) for any other path.
-    func handle(_ request: HTTPRequest, context: OAuthContext,
-                reply: @escaping (HTTPResponse) -> Void) -> Bool {
+    public func handle(_ request: HTTPRequest, context: OAuthContext,
+                       reply: @escaping (HTTPResponse) -> Void) -> Bool {
         let prefix = context.secretPrefix
         guard Self.validPrefix(prefix) else { return false }
         // Exact matches only: dot segments, encoded slashes and case variants fall through to 404.
@@ -245,8 +300,8 @@ final class OAuthServer {
         }
         sweep()
         switch route {
-        case .resourceMetadata: reply(Self.json(200, Self.resourceMetadata(context)))
-        case .serverMetadata: reply(Self.json(200, Self.serverMetadata(context)))
+        case .resourceMetadata: reply(Self.json(200, Self.resourceMetadata(context, scope: scope)))
+        case .serverMetadata: reply(Self.json(200, Self.serverMetadata(context, scope: scope)))
         case .authorize: authorize(request, context: context, reply: reply)
         case .status: reply(status(request))
         case .token: reply(token(request, context: context))
@@ -257,11 +312,11 @@ final class OAuthServer {
     }
 
     /// `WWW-Authenticate` value for a 401 on the MCP endpoint.
-    static func challenge(_ context: OAuthContext) -> String {
+    public static func challenge(_ context: OAuthContext, scope: String) -> String {
         "Bearer resource_metadata=\"\(context.resourceMetadataURL)\", scope=\"\(scope)\""
     }
 
-    static func resourceMetadata(_ context: OAuthContext) -> [String: Any] {
+    public static func resourceMetadata(_ context: OAuthContext, scope: String) -> [String: Any] {
         [
             "resource": context.resource,
             "authorization_servers": [context.issuer],
@@ -270,7 +325,7 @@ final class OAuthServer {
         ]
     }
 
-    static func serverMetadata(_ context: OAuthContext) -> [String: Any] {
+    public static func serverMetadata(_ context: OAuthContext, scope: String) -> [String: Any] {
         let base = context.issuer + "/oauth"
         return [
             "issuer": context.issuer,
@@ -292,24 +347,23 @@ final class OAuthServer {
 
     private func authorize(_ request: HTTPRequest, context: OAuthContext,
                            reply: @escaping (HTTPResponse) -> Void) {
-        guard store.isAvailable else { return reply(Self.unavailablePage()) }
+        guard store.isAvailable else { return reply(unavailablePage()) }
         // Nothing is fetched or shown outside a window, so the internet can't trigger prompts.
-        guard let window = liveWindow else { return reply(OAuthPages.closed()) }
+        guard let window = liveWindow else { return reply(pages.closed()) }
         guard let query = OAuthForm(Self.query(request.target)),
               let clientID = query.single("client_id"), !clientID.isEmpty, clientID.utf8.count <= 2048,
               let redirectURI = query.single("redirect_uri") else {
-            return reply(OAuthPages.error(400, title: "This link isn’t complete",
+            return reply(pages.error(400, title: "This link isn’t complete",
                                           message: "The app sent an authorization request without a "
                                               + "single client_id and redirect_uri. Try connecting again."))
         }
-        let badRedirect = OAuthPages.error(
+        let badRedirect = pages.error(
             400, title: "This app’s return address isn’t registered",
-            message: "The redirect_uri doesn’t exactly match one the app registered, so "
-                + "\(AppIdentity.displayName) won’t send you there.")
+            message: texts.redirectNotRegistered)
         guard Self.validRedirectURI(redirectURI) else { return reply(badRedirect) }
         if clientID.hasPrefix("https://") {
             guard let url = URL(string: clientID) else {
-                return reply(OAuthPages.error(400, title: "Unknown app",
+                return reply(pages.error(400, title: "Unknown app",
                                               message: "The app’s client_id isn’t a valid URL."))
             }
             fetcher.fetch(url) { [weak self] result in
@@ -322,28 +376,24 @@ final class OAuthServer {
                                            oauthClientID: clientID, redirectURI: redirectURI,
                                            appName: name, appURL: clientID))
                 case .success:
-                    reply(OAuthPages.error(400, title: "Unknown app",
+                    reply(pages.error(400, title: "Unknown app",
                                            message: "The app’s metadata document names a different "
                                                + "client_id than the URL it was fetched from."))
                 case .failure(let error):
-                    reply(OAuthPages.error(502, title: "Couldn’t read the app’s details",
-                                           message: "\(AppIdentity.displayName) couldn’t use the app’s "
-                                               + "metadata document. \(error.reason) Try connecting again."))
+                    reply(pages.error(502, title: "Couldn’t read the app’s details",
+                                        message: "\(self.texts.metadataUnusable) \(error.reason) Try connecting again."))
                 }
             }
             return
         }
         guard let registration = store.state?.registrations.first(where: { $0.clientID == clientID }) else {
-            return reply(OAuthPages.error(400, title: "Unknown app",
+            return reply(pages.error(400, title: "Unknown app",
                                           message: "This client_id isn’t registered. "
                                               + "Try connecting again."))
         }
         guard registration.redirectURIs.contains(redirectURI) else { return reply(badRedirect) }
         if registration.isConfidential, registration.bridgeClientID != window.clientID {
-            return reply(OAuthPages.error(403, title: "This app was set up for another client",
-                                          message: "Pairing is open for a different client in "
-                                              + "\(AppIdentity.displayName). Open the client this app was "
-                                              + "set up for and choose Connect a Cloud App."))
+            return reply(pages.error(403, title: texts.setUpForAnotherTitle, message: texts.setUpForAnother))
         }
         let name = Self.displayName(registration.clientName) ?? URL(string: redirectURI)?.host ?? "An app"
         reply(pairingStep(query, context: context, windowID: window.id, oauthClientID: clientID,
@@ -355,7 +405,7 @@ final class OAuthServer {
                              oauthClientID: String, redirectURI: String, appName: String,
                              appURL: String?) -> HTTPResponse {
         sweep()
-        guard let window = liveWindow, window.id == windowID else { return OAuthPages.closed() }
+        guard let window = liveWindow, window.id == windowID else { return pages.closed() }
         let state = query.single("state")
         func fail(_ error: String, _ description: String) -> HTTPResponse {
             let authorization = Authorization(oauthClientID: oauthClientID, redirectURI: redirectURI,
@@ -378,9 +428,7 @@ final class OAuthServer {
             return fail("invalid_target", "resource must be \(context.resource).")
         }
         guard clientAllowed(window.clientID), let bridgeName = clientName(window.clientID) else {
-            return OAuthPages.error(403, title: "Cloud access is off",
-                                    message: "This client no longer allows cloud access. Turn it on in "
-                                        + "\(AppIdentity.displayName) and connect again.")
+            return pages.error(403, title: "Cloud access is off", message: texts.cloudAccessOffPage)
         }
         let time = now()
         let request = PairingRequest(
@@ -400,7 +448,7 @@ final class OAuthServer {
         schedule(request.expiresAt.timeIntervalSince(time)) { [weak self] in self?.sweep() }
         pairingRequested(request)
         pairingChanged()
-        return OAuthPages.pairing(request, clientName: bridgeName)
+        return pages.pairing(request, clientName: bridgeName)
     }
 
     private func status(_ request: HTTPRequest) -> HTTPResponse {
@@ -417,13 +465,13 @@ final class OAuthServer {
 
     private func token(_ request: HTTPRequest, context: OAuthContext) -> HTTPResponse {
         guard store.isAvailable else {
-            return Self.oauthError(503, "temporarily_unavailable", "Connections can't be read right now.")
+            return oauthError(503, "temporarily_unavailable", "Connections can't be read right now.")
         }
         guard let form = Self.form(request) else {
-            return Self.oauthError(400, "invalid_request", "Send a form-urlencoded body.")
+            return oauthError(400, "invalid_request", "Send a form-urlencoded body.")
         }
         guard !form.hasDuplicates else {
-            return Self.oauthError(400, "invalid_request", "Repeated parameter.")
+            return oauthError(400, "invalid_request", "Repeated parameter.")
         }
         // CIMD and DCR clients are public and must not send a secret; `cfg_` clients must send theirs,
         // in a Basic header or the body (client_secret_basic or client_secret_post), never both.
@@ -433,69 +481,69 @@ final class OAuthServer {
         if let headerAuth {
             guard let (user, password) = Self.basicCredentials(headerAuth), secret == nil,
                   clientID == nil || clientID == user else {
-                return Self.oauthError(401, "invalid_client", "Send client credentials once.", basic: true)
+                return oauthError(401, "invalid_client", "Send client credentials once.", basic: true)
             }
             clientID = user
             secret = password.isEmpty ? nil : password
         }
         guard let clientID, !clientID.isEmpty else {
-            return Self.oauthError(400, "invalid_request", "client_id is required.")
+            return oauthError(400, "invalid_request", "client_id is required.")
         }
         let expectedSecret = store.state?.registrations.first { $0.clientID == clientID }?.secretHash
         if let expectedSecret {
             guard let secret, Self.match(OAuthStore.digest(secret), in: [[expectedSecret]]) != nil else {
-                return Self.oauthError(401, "invalid_client", "The client secret is wrong.",
+                return oauthError(401, "invalid_client", "The client secret is wrong.",
                                        basic: headerAuth != nil)
             }
         } else if secret != nil {
-            return Self.oauthError(401, "invalid_client", "This client is public: send no client_secret.",
+            return oauthError(401, "invalid_client", "This client is public: send no client_secret.",
                                    basic: headerAuth != nil)
         }
         switch form.single("grant_type") {
         case "authorization_code": return exchangeCode(form, clientID: clientID)
         case "refresh_token": return refresh(form, clientID: clientID, context: context)
-        case nil: return Self.oauthError(400, "invalid_request", "grant_type is required.")
+        case nil: return oauthError(400, "invalid_request", "grant_type is required.")
         default:
-            return Self.oauthError(400, "unsupported_grant_type", "Use authorization_code or refresh_token.")
+            return oauthError(400, "unsupported_grant_type", "Use authorization_code or refresh_token.")
         }
     }
 
     private func exchangeCode(_ form: OAuthForm, clientID: String) -> HTTPResponse {
         guard let code = form.single("code") else {
-            return Self.oauthError(400, "invalid_request", "code is required.")
+            return oauthError(400, "invalid_request", "code is required.")
         }
         let key = OAuthStore.digest(code)
         let time = now()
         if let spent = spentCodes[key] {
             // A replayed code means someone else holds it too: drop what it produced (OAuth 2.1 §4.1.3).
             if let connection = spent.connection { revoke(connectionID: connection) }
-            return Self.oauthError(400, "invalid_grant", "This code was already used.")
+            return oauthError(400, "invalid_grant", "This code was already used.")
         }
         // Single use, whatever the outcome: a failed attempt burns the code.
         guard let grant = codes.removeValue(forKey: key), grant.expiresAt > time else {
-            return Self.oauthError(400, "invalid_grant", "The code is invalid or expired.")
+            return oauthError(400, "invalid_grant", "The code is invalid or expired.")
         }
         spentCodes[key] = (nil, grant.expiresAt.addingTimeInterval(Self.pairingDuration))
         let authorization = grant.authorization
         guard authorization.oauthClientID == clientID,
               form.single("redirect_uri") == authorization.redirectURI else {
-            return Self.oauthError(400, "invalid_grant", "client_id or redirect_uri doesn't match the code.")
+            return oauthError(400, "invalid_grant", "client_id or redirect_uri doesn't match the code.")
         }
         guard let verifier = form.single("code_verifier") else {
-            return Self.oauthError(400, "invalid_request", "code_verifier is required.")
+            return oauthError(400, "invalid_request", "code_verifier is required.")
         }
         guard Self.validVerifier(verifier), Self.s256(verifier) == authorization.codeChallenge else {
-            return Self.oauthError(400, "invalid_grant", "code_verifier doesn't match the code_challenge.")
+            return oauthError(400, "invalid_grant", "code_verifier doesn't match the code_challenge.")
         }
         if let resource = form.single("resource"),
            Self.canonicalResource(resource) != authorization.resource {
-            return Self.oauthError(400, "invalid_target", "resource doesn't match the authorization.")
+            return oauthError(400, "invalid_target", "resource doesn't match the authorization.")
         }
         guard clientAllowed(grant.clientID) else {
-            return Self.oauthError(400, "invalid_grant", "This client no longer allows cloud access.")
+            return oauthError(400, "invalid_grant", texts.cloudAccessOff)
         }
-        let access = Self.randomToken(prefix: Self.accessPrefix)
-        let refresh = Self.randomToken(prefix: Self.refreshPrefix)
+        let access = Self.randomToken(prefix: accessPrefix)
+        let refresh = Self.randomToken(prefix: refreshPrefix)
         let connection = OAuthConnection(
             id: UUID(), clientID: grant.clientID, appName: grant.appName, oauthClientID: clientID,
             createdAt: time, lastUsedAt: nil, resource: authorization.resource,
@@ -512,22 +560,21 @@ final class OAuthServer {
                 state.registrations[index].lastUsedAt = time
             }
         }
-        guard saved else { return Self.oauthError(500, "server_error", "Connections couldn't be saved.") }
+        guard saved else { return oauthError(500, "server_error", "Connections couldn't be saved.") }
         guard !full else {
-            return Self.oauthError(400, "invalid_grant", "Too many connected apps. Revoke some in "
-                                       + "\(AppIdentity.displayName) first.")
+            return oauthError(400, "invalid_grant", texts.tooManyConnections)
         }
         spentCodes[key] = (connection.id, grant.expiresAt.addingTimeInterval(Self.pairingDuration))
         connectionsChanged(grant.clientID)
-        return Self.tokenResponse(access: access, refresh: refresh)
+        return tokenResponse(access: access, refresh: refresh)
     }
 
     private func refresh(_ form: OAuthForm, clientID: String, context: OAuthContext) -> HTTPResponse {
         guard let presented = form.single("refresh_token") else {
-            return Self.oauthError(400, "invalid_request", "refresh_token is required.")
+            return oauthError(400, "invalid_request", "refresh_token is required.")
         }
-        let invalid = Self.oauthError(400, "invalid_grant", "The refresh token is invalid or expired.")
-        guard Self.validToken(presented, prefix: Self.refreshPrefix), let state = store.state else {
+        let invalid = oauthError(400, "invalid_grant", "The refresh token is invalid or expired.")
+        guard Self.validToken(presented, prefix: refreshPrefix), let state = store.state else {
             return invalid
         }
         let digest = OAuthStore.digest(presented)
@@ -560,13 +607,13 @@ final class OAuthServer {
             return invalid
         }
         if let resource = form.single("resource"), Self.canonicalResource(resource) != connection.resource {
-            return Self.oauthError(400, "invalid_target", "resource doesn't match the connection.")
+            return oauthError(400, "invalid_target", "resource doesn't match the connection.")
         }
         guard clientAllowed(connection.clientID) else {
-            return Self.oauthError(400, "invalid_grant", "This client no longer allows cloud access.")
+            return oauthError(400, "invalid_grant", texts.cloudAccessOff)
         }
-        let access = Self.randomToken(prefix: Self.accessPrefix)
-        let refresh = Self.randomToken(prefix: Self.refreshPrefix)
+        let access = Self.randomToken(prefix: accessPrefix)
+        let refresh = Self.randomToken(prefix: refreshPrefix)
         // On a retry the undelivered token is retired too, and the one presented stays the newest
         // previous token, so a second retry within the grace period still works.
         // The grace period runs from the first rotation, so retries can't extend it.
@@ -587,8 +634,8 @@ final class OAuthServer {
             if let index = state.connections.firstIndex(where: { $0.id == id }) {
                 state.connections[index] = connection
             }
-        }) else { return Self.oauthError(500, "server_error", "Connections couldn't be saved.") }
-        return Self.tokenResponse(access: access, refresh: refresh)
+        }) else { return oauthError(500, "server_error", "Connections couldn't be saved.") }
+        return tokenResponse(access: access, refresh: refresh)
     }
 
     // MARK: Registration and revocation endpoints
@@ -596,35 +643,34 @@ final class OAuthServer {
     /// RFC 7591, kept as claude.ai's fallback for servers without CIMD. Public clients only.
     private func register(_ request: HTTPRequest) -> HTTPResponse {
         guard store.isAvailable else {
-            return Self.oauthError(503, "temporarily_unavailable", "Registrations can't be read right now.")
+            return oauthError(503, "temporarily_unavailable", "Registrations can't be read right now.")
         }
         // Only while the user has a pairing window open: apps register right
         // before they authorize, and outside a window nobody on the internet
         // can add or churn registrations.
         guard liveWindow != nil else {
-            return Self.oauthError(403, "access_denied", "Pairing isn't open. In \(AppIdentity.displayName) "
-                                       + "on the Mac, open the client and choose Connect a Cloud App.")
+            return oauthError(403, "access_denied", texts.registrationClosed)
         }
         guard Self.mediaType(request) == "application/json", request.body.count <= Self.maxBodyBytes,
               let object = try? JSONSerialization.jsonObject(with: request.body),
               let metadata = object as? [String: Any] else {
-            return Self.oauthError(400, "invalid_client_metadata", "Send client metadata as a JSON object.")
+            return oauthError(400, "invalid_client_metadata", "Send client metadata as a JSON object.")
         }
         guard let uris = metadata["redirect_uris"] as? [String], (1...5).contains(uris.count),
               uris.allSatisfy(Self.validRedirectURI) else {
-            return Self.oauthError(400, "invalid_redirect_uri", "Send 1–5 redirect_uris: https, or http "
+            return oauthError(400, "invalid_redirect_uri", "Send 1–5 redirect_uris: https, or http "
                                        + "only for 127.0.0.1 or localhost.")
         }
         var name: String?
         if let value = metadata["client_name"] {
             guard let text = value as? String, OAuthStore.validName(text) else {
-                return Self.oauthError(400, "invalid_client_metadata",
+                return oauthError(400, "invalid_client_metadata",
                                        "client_name must be text of at most 100 bytes.")
             }
             name = text
         }
         if let method = metadata["token_endpoint_auth_method"], method as? String != "none" {
-            return Self.oauthError(400, "invalid_client_metadata", "token_endpoint_auth_method must be none.")
+            return oauthError(400, "invalid_client_metadata", "token_endpoint_auth_method must be none.")
         }
         let time = now()
         let registration = OAuthRegistration(clientID: "dcr_" + Self.randomToken(prefix: "").prefix(32),
@@ -642,9 +688,9 @@ final class OAuthServer {
             state.registrations.append(registration)
         }
         guard saved else {
-            return Self.oauthError(500, "server_error", "The registration couldn't be saved.")
+            return oauthError(500, "server_error", "The registration couldn't be saved.")
         }
-        guard !full else { return Self.oauthError(400, "invalid_client_metadata", "Too many registrations.") }
+        guard !full else { return oauthError(400, "invalid_client_metadata", "Too many registrations.") }
         var body: [String: Any] = [
             "client_id": registration.clientID,
             "client_id_issued_at": Int(time.timeIntervalSince1970),
@@ -660,12 +706,12 @@ final class OAuthServer {
     /// RFC 7009: always 200 for a well-formed request, whether or not the token was known.
     private func revoke(_ request: HTTPRequest) -> HTTPResponse {
         guard let form = Self.form(request), !form.hasDuplicates, let token = form.single("token") else {
-            return Self.oauthError(400, "invalid_request", "token is required.")
+            return oauthError(400, "invalid_request", "token is required.")
         }
         let accepted = HTTPResponse(status: 200)
         guard let state = store.state,
-              Self.validToken(token, prefix: Self.accessPrefix)
-                || Self.validToken(token, prefix: Self.refreshPrefix)
+              Self.validToken(token, prefix: accessPrefix)
+                || Self.validToken(token, prefix: refreshPrefix)
         else { return accepted }
         let digest = OAuthStore.digest(token)
         guard let index = Self.match(digest, in: state.connections.map { [$0.accessHash, $0.refreshHash] })
@@ -679,9 +725,9 @@ final class OAuthServer {
 
     // MARK: Bearer validation and connections
 
-    /// The bridge client ID for an unexpired access token issued for `resource` (audience check).
-    func authenticate(accessToken: String, resource: String) -> String? {
-        guard Self.validToken(accessToken, prefix: Self.accessPrefix), let state = store.state else {
+    /// The agent for an unexpired access token issued for `resource` (audience check).
+    public func authenticate(accessToken: String, resource: String) -> String? {
+        guard Self.validToken(accessToken, prefix: accessPrefix), let state = store.state else {
             return nil
         }
         let digest = OAuthStore.digest(accessToken)
@@ -708,7 +754,7 @@ final class OAuthServer {
         return connection.clientID
     }
 
-    func connections(clientID: String) -> [OAuthConnectionView] {
+    public func connections(clientID: String) -> [OAuthConnectionView] {
         let time = now()
         return (store.state?.connections ?? [])
             .filter { $0.clientID == clientID && $0.refreshExpiresAt > time }
@@ -717,7 +763,7 @@ final class OAuthServer {
                                        createdAt: $0.createdAt, lastUsedAt: $0.lastUsedAt) }
     }
 
-    func revoke(connectionID: UUID) {
+    public func revoke(connectionID: UUID) {
         guard let connection = store.state?.connections.first(where: { $0.id == connectionID }) else {
             return
         }
@@ -729,7 +775,7 @@ final class OAuthServer {
     /// be used or refreshed, so they're removed (with unredeemed codes and open requests) and the
     /// apps have to connect again. Returns how many connections were removed.
     @discardableResult
-    func revokeConnections(notFor resource: String) -> Int {
+    public func revokeConnections(notFor resource: String) -> Int {
         let current = Self.canonicalResource(resource)
         codes = codes.filter { $0.value.authorization.resource == current }
         if pairings.contains(where: { $0.redirect == nil && $0.authorization.resource != current }) {
@@ -744,7 +790,7 @@ final class OAuthServer {
     }
 
     /// Also drops codes not yet redeemed for this client, and the confidential clients set up for it.
-    func revokeAll(clientID: String) {
+    public func revokeAll(clientID: String) {
         codes = codes.filter { $0.value.clientID != clientID }
         guard let state = store.state,
               state.connections.contains(where: { $0.clientID == clientID })
@@ -760,11 +806,11 @@ final class OAuthServer {
     /// a client ID and secret instead of discovering this server (Gemini Enterprise). It replaces the
     /// bridge client's earlier ones that no connection uses. The secret is returned once and only
     /// its digest is kept. Nil when the store is unavailable or full.
-    func registerConfidentialClient(for bridgeClientID: String, name: String,
-                                    redirectURI: String) -> (clientID: String, secret: String)? {
+    public func registerConfidentialClient(for bridgeClientID: String, name: String,
+                                           redirectURI: String) -> (clientID: String, secret: String)? {
         guard clientAllowed(bridgeClientID), Self.validRedirectURI(redirectURI), OAuthStore.validName(name)
         else { return nil }
-        let secret = Self.randomToken(prefix: Self.secretPrefix)
+        let secret = Self.randomToken(prefix: secretPrefix)
         let registration = OAuthRegistration(
             clientID: "cfg_" + Self.randomToken(prefix: "").prefix(32), clientName: name,
             redirectURIs: [redirectURI], createdAt: now(), secretHash: OAuthStore.digest(secret),
@@ -799,14 +845,14 @@ final class OAuthServer {
         }
     }
 
-    nonisolated static func validToken(_ token: String, prefix: String) -> Bool {
+    public nonisolated static func validToken(_ token: String, prefix: String) -> Bool {
         token.utf8.count == prefix.utf8.count + 64 && token.hasPrefix(prefix)
             && Hex.decode(String(token.dropFirst(prefix.count))) != nil
     }
 
     /// https anywhere; http only for loopback (RFC 8252 §7.3). No fragments, user info or
     /// non-ASCII, so the URI is safe to put in a `Location` header and navigate to.
-    static func validRedirectURI(_ uri: String) -> Bool {
+    public static func validRedirectURI(_ uri: String) -> Bool {
         guard uri.utf8.count <= OAuthStore.maxURIBytes, uri.utf8.allSatisfy({ (0x21...0x7E).contains($0) }),
               let components = URLComponents(string: uri), components.fragment == nil,
               components.user == nil, components.password == nil,
@@ -931,29 +977,27 @@ final class OAuthServer {
         return (user, secret)
     }
 
-    private static func tokenResponse(access: String, refresh: String) -> HTTPResponse {
-        json(200, [
+    private func tokenResponse(access: String, refresh: String) -> HTTPResponse {
+        Self.json(200, [
             "access_token": access,
             "token_type": "Bearer",
-            "expires_in": Int(accessLifetime),
+            "expires_in": Int(Self.accessLifetime),
             "refresh_token": refresh,
             "scope": scope,
         ])
     }
 
-    private static func oauthError(_ status: Int, _ error: String, _ description: String,
-                                   basic: Bool = false) -> HTTPResponse {
-        var response = json(status, ["error": error, "error_description": description])
+    private func oauthError(_ status: Int, _ error: String, _ description: String,
+                            basic: Bool = false) -> HTTPResponse {
+        var response = Self.json(status, ["error": error, "error_description": description])
         if basic {
-            response.headers.append(("WWW-Authenticate", "Basic realm=\"\(AppIdentity.displayName)\""))
+            response.headers.append(("WWW-Authenticate", "Basic realm=\"\(displayName)\""))
         }
         return response
     }
 
-    private static func unavailablePage() -> HTTPResponse {
-        OAuthPages.error(503, title: "Connections can’t be read",
-                         message: "\(AppIdentity.displayName) can’t read its list of connected apps, so "
-                             + "it isn’t accepting new ones. Check the app on your Mac.")
+    private func unavailablePage() -> HTTPResponse {
+        pages.error(503, title: "Connections can’t be read", message: texts.storeUnavailable)
     }
 
     static func json(_ status: Int, _ object: [String: Any]) -> HTTPResponse {

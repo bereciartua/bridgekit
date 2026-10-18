@@ -1,28 +1,36 @@
+import BridgeKitCore
 import Foundation
 
 /// Remote Access settings the listener needs, read on the HTTP queue.
-struct RemoteConfiguration: Equatable {
+public struct RemoteConfiguration: Equatable, Sendable {
     /// 22 base64url characters; the MCP endpoint is `/r/<secret>/mcp`.
-    var secret: String
+    public var secret: String
     /// `https://my-mac.tail1234.ts.net`, or nil until the user enters it.
-    var publicOrigin: String?
-    var port: Int
+    public var publicOrigin: String?
+    public var port: Int
 
-    var secretPrefix: String { "/r/" + secret }
+    public var secretPrefix: String { "/r/" + secret }
 
     /// While Switch Tunnel… or Address ▸ Edit… tests a new address (plan 08
     /// T05): accepted for the health check only, never for MCP or OAuth, and
     /// never saved. Nil otherwise.
-    var candidateOrigin: String? = nil
+    public var candidateOrigin: String? = nil
+
+    public init(secret: String, publicOrigin: String?, port: Int, candidateOrigin: String? = nil) {
+        self.secret = secret
+        self.publicOrigin = publicOrigin
+        self.port = port
+        self.candidateOrigin = candidateOrigin
+    }
 
     /// Hosts a tunnel may present: the public hostname (Tailscale Funnel keeps
     /// it), or this port on loopback (tunnels that rewrite Host).
-    var allowedHosts: Set<String> {
+    public var allowedHosts: Set<String> {
         Set(["127.0.0.1:\(port)", "localhost:\(port)"]).union(Self.hosts(publicOrigin))
     }
 
     /// The candidate's Host values, with the same port rules.
-    var candidateHosts: Set<String> { Self.hosts(candidateOrigin) }
+    public var candidateHosts: Set<String> { Self.hosts(candidateOrigin) }
 
     private static func hosts(_ origin: String?) -> Set<String> {
         var hosts = Set<String>()
@@ -38,14 +46,14 @@ struct RemoteConfiguration: Equatable {
         return hosts
     }
 
-    var oauthContext: OAuthContext? {
+    public var oauthContext: OAuthContext? {
         publicOrigin.map { OAuthContext(publicOrigin: $0, secretPrefix: secretPrefix) }
     }
 
     /// The URL cloud agents use, once the public address is known.
-    var mcpURL: String? { publicOrigin.map { $0 + secretPrefix + "/mcp" } }
+    public var mcpURL: String? { publicOrigin.map { $0 + secretPrefix + "/mcp" } }
 
-    static func newSecret() -> String {
+    public static func newSecret() -> String {
         var generator = SystemRandomNumberGenerator()
         let bytes = Data((0..<16).map { _ in UInt8.random(in: .min ... .max, using: &generator) })
         return bytes.base64EncodedString()
@@ -53,14 +61,14 @@ struct RemoteConfiguration: Equatable {
             .replacingOccurrences(of: "=", with: "")
     }
 
-    static func validSecret(_ secret: String) -> Bool {
+    public static func validSecret(_ secret: String) -> Bool {
         secret.utf8.count == 22 && secret.utf8.allSatisfy {
             (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 45 || $0 == 95
         }
     }
 
     /// `https://host` with an optional port, nothing else.
-    static func normalizedOrigin(_ text: String) -> String? {
+    public static func normalizedOrigin(_ text: String) -> String? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard let url = URL(string: trimmed), url.scheme?.lowercased() == "https",
@@ -74,20 +82,22 @@ struct RemoteConfiguration: Equatable {
 /// The checks for the Remote Access port, in order: path secret (unknown
 /// paths are 404 before anything else, so scanners learn nothing), Host,
 /// then per-route rules. Runs on the HTTP queue.
-enum RemoteHTTPGate {
-    enum Verdict {
+public enum RemoteHTTPGate {
+    public enum Verdict: Sendable {
         case respond(HTTPResponse, close: Bool)
         case mcp(token: String?, address: String)
-        case health(nonce: String, headers: [String], tunnel: String?)
+        case health(nonce: String, headers: [String], tunnel: TunnelProvider?)
         case oauth(address: String)
     }
 
     /// Headers tunnels add. Never trusted for authorization: anything on this
     /// Mac can set them. Used for display and the per-address lockout.
-    static let tunnelHeaders = ["tailscale-funnel-request", "cf-ray", "cf-connecting-ip", "x-forwarded-for",
+    public static let tunnelHeaders = ["tailscale-funnel-request", "cf-ray", "cf-connecting-ip", "x-forwarded-for",
                                 "x-forwarded-host", "x-forwarded-proto"]
 
-    static func check(_ request: HTTPRequest, configuration: RemoteConfiguration) -> Verdict {
+    /// `originRefused` is the 403 body's message (the app's `RemoteTexts.originRefused`).
+    public static func check(_ request: HTTPRequest, configuration: RemoteConfiguration,
+                             originRefused: String = "Requests from web pages aren't accepted.") -> Verdict {
         let path = request.path
         let prefix = configuration.secretPrefix
         let route: String
@@ -125,7 +135,7 @@ enum RemoteHTTPGate {
                 return .respond(notFound(), close: false)
             }
             // Detected from the full headers: ngrok and quick tunnels are told apart by host values.
-            let tunnel = TunnelProvider.detect(headers: request.headers.map { ($0.name, $0.value) })?.name
+            let tunnel = TunnelProvider.detect(headers: request.headers.map { ($0.name, $0.value) })
             return .health(nonce: nonce, headers: tunnelHeaders.filter { request.header($0) != nil },
                            tunnel: tunnel)
         case "oauth":
@@ -136,7 +146,7 @@ enum RemoteHTTPGate {
         if request.header("origin") != nil {
             return .respond(MCPHTTPGate.json(403, JSONRPC.error(
                 id: nil, code: JSONRPC.invalidRequest,
-                message: "Requests from web pages aren't accepted.", omitID: true)), close: false)
+                message: originRefused, omitID: true)), close: false)
         }
         guard request.method == "POST" else {
             return .respond(HTTPResponse(status: 405, headers: [("Allow", "POST")]), close: false)
@@ -167,7 +177,7 @@ enum RemoteHTTPGate {
     /// address they saw to `X-Forwarded-For`, so its last entry is the one the
     /// caller can't choose; `CF-Connecting-IP` passes through Funnel and ngrok
     /// as sent, so it's used only without `X-Forwarded-For`.
-    static func forwardedAddress(_ request: HTTPRequest) -> String {
+    public static func forwardedAddress(_ request: HTTPRequest) -> String {
         if let forwarded = request.header("x-forwarded-for")?.split(separator: ",").last
             .map({ $0.trimmingCharacters(in: .whitespaces) }), validAddress(forwarded) {
             return forwarded
@@ -195,7 +205,7 @@ enum RemoteHTTPGate {
         return difference == 0
     }
 
-    static func query(_ target: String) -> [String: String] {
+    public static func query(_ target: String) -> [String: String] {
         guard let mark = target.firstIndex(of: "?") else { return [:] }
         var result = [String: String]()
         for pair in target[target.index(after: mark)...].split(separator: "&") {
@@ -207,17 +217,19 @@ enum RemoteHTTPGate {
         return result
     }
 
-    static func notFound() -> HTTPResponse { MCPHTTPGate.text(404, "Not found.\n") }
+    public static func notFound() -> HTTPResponse { MCPHTTPGate.text(404, "Not found.\n") }
 }
 
 /// Nonces issued for the Remote Access page ▸ Test. The health endpoint
 /// answers only for a nonce issued in the last 30 seconds, which proves the
 /// public URL reaches this app. Thread-safe.
-final class RemoteNonces: @unchecked Sendable {
+public final class RemoteNonces: @unchecked Sendable {
     private let lock = NSLock()
     private var issued = [String: Date]()
 
-    func issue() -> String {
+    public init() {}
+
+    public func issue() -> String {
         let nonce = RemoteConfiguration.newSecret()
         lock.lock()
         issued = issued.filter { Date().timeIntervalSince($0.value) < 30 }
@@ -226,7 +238,7 @@ final class RemoteNonces: @unchecked Sendable {
         return nonce
     }
 
-    func consume(_ nonce: String) -> Bool {
+    public func consume(_ nonce: String) -> Bool {
         lock.lock()
         defer { lock.unlock() }
         guard let at = issued.removeValue(forKey: nonce) else { return false }
@@ -236,75 +248,98 @@ final class RemoteNonces: @unchecked Sendable {
 
 /// The last 50 remote requests' tunnel and forwarded address, in memory
 /// only, for Activity's inspector. Never written to disk.
-struct RemoteRequestNote: Equatable {
-    let at: Date
-    let clientID: String
-    let tunnel: String?
-    let address: String
+public struct RemoteRequestNote: Equatable, Sendable {
+    public let at: Date
+    /// The app's id for the agent.
+    public let clientID: String
+    /// The tunnel its headers point to; display only.
+    public let tunnel: TunnelProvider?
+    /// The forwarded address (`RemoteHTTPGate.forwardedAddress`); display only.
+    public let address: String
+
+    public init(at: Date, clientID: String, tunnel: TunnelProvider?, address: String) {
+        self.at = at
+        self.clientID = clientID
+        self.tunnel = tunnel
+        self.address = address
+    }
 }
 
-/// Runs the Remote Access listener (§22.3): a second loopback port that only
-/// a tunnel should reach, with its own credentials and stricter limits.
+/// Runs the Remote Access listener: a second loopback port that only a tunnel
+/// should reach, with its own credentials. Every request that passes the gate
+/// and authenticates goes to the same `MCPServer` as the local port, with
+/// `MCPAuthentication(remote: true)`.
 @MainActor
-final class RemoteMCPService {
-    enum Status: Equatable {
+public final class RemoteMCPService {
+    public enum Status: Equatable, Sendable {
         case off
         case starting
         case listening(port: Int)
         case failed(LoopbackHTTPServer.Failure)
     }
 
-    private(set) var status = Status.off {
+    public private(set) var status = Status.off {
         didSet { if status != oldValue { statusChanged(status) } }
     }
-    var statusChanged: (Status) -> Void = { _ in }
+    public var statusChanged: (Status) -> Void = { _ in }
     /// Called on the main actor for each authenticated remote request.
-    var didServe: (RemoteRequestNote) -> Void = { _ in }
+    public var didServe: (RemoteRequestNote) -> Void = { _ in }
 
-    let nonces = RemoteNonces()
+    public let nonces = RemoteNonces()
+    public let configuration: RemoteBridgeConfiguration
     private let server: MCPServer
-    private let registry: ClientRegistry
+    private let authenticator: RemoteAuthenticator
     private let limiter: RateLimiter
     private let counters: MCPTrafficCounters
     private let oauth: OAuthServer?
-    private let configurationBox = Box()
+    private let http: HTTPLimits
+    private let maxConnections: Int
+    private let settingsBox = Box()
     private var listener: LoopbackHTTPServer?
     private var generation = 0
 
-    init(server: MCPServer, registry: ClientRegistry, limiter: RateLimiter, counters: MCPTrafficCounters,
-         oauth: OAuthServer?) {
+    /// `limiter` keeps the per-address lockout of failed authentications;
+    /// `http` and `maxConnections` default to the local port's.
+    public init(server: MCPServer, configuration: RemoteBridgeConfiguration, authenticator: RemoteAuthenticator,
+                limiter: RateLimiter, counters: MCPTrafficCounters, oauth: OAuthServer?,
+                http: HTTPLimits? = nil, maxConnections: Int? = nil) {
         self.server = server
-        self.registry = registry
+        self.configuration = configuration
+        self.authenticator = authenticator
         self.limiter = limiter
         self.counters = counters
         self.oauth = oauth
+        self.http = http ?? server.configuration.http
+        self.maxConnections = maxConnections ?? server.configuration.maxConnections
     }
 
-    var configuration: RemoteConfiguration? { configurationBox.value }
+    /// The settings in use (secret, address, port), or nil before the first start.
+    public var settings: RemoteConfiguration? { settingsBox.value }
 
     /// Applies new settings without restarting when only the address or
     /// secret changed.
-    func update(_ configuration: RemoteConfiguration) {
-        let restart = configurationBox.value?.port != configuration.port
-        configurationBox.value = configuration
-        if restart && listener != nil { start(configuration) }
+    public func update(_ settings: RemoteConfiguration) {
+        let restart = settingsBox.value?.port != settings.port
+        settingsBox.value = settings
+        if restart && listener != nil { start(settings) }
     }
 
-    func start(_ configuration: RemoteConfiguration) {
+    public func start(_ settings: RemoteConfiguration) {
         stopListener()
-        configurationBox.value = configuration
+        settingsBox.value = settings
         generation += 1
         let current = generation
-        let listener = LoopbackHTTPServer(port: configuration.port, handler: makeHandler())
+        let listener = LoopbackHTTPServer(port: settings.port, limits: http, maxConnections: maxConnections,
+                                          handler: makeHandler())
         self.listener = listener
         status = .starting
         listener.start { [weak self] state in
-            MainActor.assumeIsolated {
+            Task { @MainActor in
                 guard let self, self.generation == current else { return }
                 switch state {
                 case .ready(let port):
                     // The Host check uses the port actually bound (0 picks one in tests).
-                    self.configurationBox.value?.port = port
+                    self.settingsBox.value?.port = port
                     self.status = .listening(port: port)
                 case .failed(let failure):
                     self.stopListener()
@@ -315,7 +350,7 @@ final class RemoteMCPService {
         }
     }
 
-    func stop() {
+    public func stop() {
         stopListener()
         status = .off
     }
@@ -327,35 +362,38 @@ final class RemoteMCPService {
     }
 
     private func makeHandler() -> LoopbackHTTPServer.Handler {
-        let box = configurationBox
+        let box = settingsBox
         let limiter = limiter
         let counters = counters
         let nonces = nonces
+        let texts = configuration.texts
+        let remotePrefix = configuration.remoteTokenPrefix
+        let accessPrefix = configuration.accessTokenPrefix
         return { [weak self] request, connection, reply in
-            let send: (HTTPResponse, Bool) -> Void = { response, close in
+            let send: @Sendable (HTTPResponse, Bool) -> Void = { response, close in
                 counters.record(status: response.status)
                 reply(response, close)
             }
-            guard let configuration = box.value else { return send(RemoteHTTPGate.notFound(), true) }
-            switch RemoteHTTPGate.check(request, configuration: configuration) {
+            guard let settings = box.value else { return send(RemoteHTTPGate.notFound(), true) }
+            switch RemoteHTTPGate.check(request, configuration: settings, originRefused: texts.originRefused) {
             case .respond(let response, let close):
                 send(response, close)
             case .health(let nonce, let headers, let tunnel):
                 guard nonces.consume(nonce) else { return send(RemoteHTTPGate.notFound(), false) }
                 let body: [String: Any] = ["ok": true, "nonce": nonce, "headers": headers,
-                                           "tunnel": tunnel ?? NSNull()]
+                                           "tunnel": tunnel?.wireName ?? NSNull()]
                 send(MCPHTTPGate.json(200, JSONRPC.encode(body)), false)
             case .oauth:
                 // No lockout here: these endpoints take no guessable secret (codes and tokens carry
                 // 256 bits), and a lockout keyed on a forwarded address would let anyone block
                 // token refreshes for everybody.
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        guard let self, let oauth = self.oauth, let context = configuration.oauthContext,
-                              oauth.handle(request, context: context, reply: { send($0, false) }) else {
-                            send(RemoteHTTPGate.notFound(), false)
-                            return
-                        }
+                // A Task rather than DispatchQueue.main: hosts that drain the main
+                // queue with dispatchMain() run it off the main thread.
+                Task { @MainActor in
+                    guard let self, let oauth = self.oauth, let context = settings.oauthContext,
+                          oauth.handle(request, context: context, reply: { send($0, false) }) else {
+                        send(RemoteHTTPGate.notFound(), false)
+                        return
                     }
                 }
             case .mcp(let token, let address):
@@ -363,76 +401,74 @@ final class RemoteMCPService {
                 // A well-formed token is always checked, so a locked-out address (which a caller can
                 // claim for someone else) never blocks an agent with valid credentials.
                 let plausible = token.map {
-                    ClientRegistry.validRemoteToken($0)
-                        || OAuthServer.validToken($0, prefix: OAuthServer.accessPrefix)
+                    AgentKey.isValid($0, prefix: remotePrefix) || OAuthServer.validToken($0, prefix: accessPrefix)
                 } ?? false
                 if !plausible, let wait = limiter.remoteAuthLockout(address) {
                     counters.recordAuthFailure()
                     return send(MCPHTTPGate.lockedOut(retryAfter: wait), true)
                 }
-                let tunnel = TunnelProvider.detect(headers: request.headers.map { ($0.name, $0.value) })?
-                    .name
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        guard let self else { return }
-                        let auth = self.authentication(configuration: configuration, address: address,
-                                                       tunnel: tunnel)
-                        self.server.handle(request, key: token ?? "", auth: auth, whenClosed: { action in
-                            connection.whenClosed { DispatchQueue.main.async { MainActor.assumeIsolated(action) } }
-                        }, reply: { send($0.response, $0.close) })
-                    }
+                let tunnel = TunnelProvider.detect(headers: request.headers.map { ($0.name, $0.value) })
+                Task { @MainActor in
+                    guard let self else { return }
+                    let auth = self.authentication(settings: settings, address: address, tunnel: tunnel)
+                    self.server.handle(request, key: token ?? "", auth: auth, whenClosed: { action in
+                        let action = MainActorBox(action)
+                        return connection.whenClosed {
+                            Task { @MainActor in action.value() }
+                        }
+                    }, reply: { send($0.response, $0.close) })
                 }
             }
         }
     }
 
-    /// Remote tokens and OAuth access tokens. Local MCP tokens are refused
-    /// here, so a token leaked from an agent config on this Mac is useless
-    /// from the internet.
-    private func authentication(configuration: RemoteConfiguration, address: String,
-                                tunnel: String?) -> MCPAuthentication {
+    /// Remote tokens and OAuth access tokens. Local MCP keys are refused here,
+    /// so a key leaked from an agent config on this Mac is useless from the
+    /// internet.
+    private func authentication(settings: RemoteConfiguration, address: String,
+                                tunnel: TunnelProvider?) -> MCPAuthentication {
         MCPAuthentication(authenticate: { [weak self] token in
             guard let self else { return .unavailable }
-            let result: Result<String, ClientRegistryError>
-            if ClientRegistry.validRemoteToken(token) {
-                result = self.registry.authenticateRemoteToken(token)
-            } else if token.hasPrefix(OAuthServer.accessPrefix), let oauth = self.oauth,
-                      let resource = configuration.oauthContext?.resource,
-                      let clientID = oauth.authenticate(accessToken: token, resource: resource) {
-                result = .success(clientID)
+            let outcome: AuthenticationOutcome
+            if AgentKey.isValid(token, prefix: self.configuration.remoteTokenPrefix) {
+                outcome = await self.authenticator.authenticate(remoteToken: PresentedKey(token))
+            } else if token.hasPrefix(self.configuration.accessTokenPrefix), let oauth = self.oauth,
+                      let resource = settings.oauthContext?.resource,
+                      let agentID = oauth.authenticate(accessToken: token, resource: resource) {
+                outcome = await self.authenticator.authenticate(agentID: agentID)
             } else {
-                self.registry.recordFailedRemoteAuth()
-                result = .failure(.unauthorized)
+                self.authenticator.recordFailedRemoteAuth()
+                outcome = .rejected
             }
-            if case .success(let clientID) = result {
-                self.didServe(RemoteRequestNote(at: Date(), clientID: clientID, tunnel: tunnel, address: address))
+            if case .authenticated(let agent) = outcome {
+                self.didServe(RemoteRequestNote(at: Date(), clientID: agent.id, tunnel: tunnel, address: address))
             }
-            return EKBridgeMCP.outcome(result, registry: self.registry)
+            return outcome
         }, rejected: { [weak self] in
             self?.counters.recordAuthFailure()
             self?.limiter.recordFailedRemoteAuth(address)
             if let wait = self?.limiter.remoteAuthLockout(address) {
                 return MCPServer.Reply(response: MCPHTTPGate.lockedOut(retryAfter: wait), close: true)
             }
-            return MCPServer.Reply(response: Self.unauthorized(configuration))
+            guard let self else { return MCPServer.Reply(response: HTTPResponse(status: 401)) }
+            return MCPServer.Reply(response: Self.unauthorized(settings, configuration: self.configuration))
         }, remote: true)
     }
 
     /// 401 for the remote endpoint. With a public address, the challenge
     /// names the protected-resource metadata so OAuth clients can start.
-    static func unauthorized(_ configuration: RemoteConfiguration) -> HTTPResponse {
+    public static func unauthorized(_ settings: RemoteConfiguration,
+                                    configuration: RemoteBridgeConfiguration) -> HTTPResponse {
         var response = MCPHTTPGate.json(401, JSONRPC.error(
-            id: nil, code: JSONRPC.authenticationFailed,
-            message: "\(AppIdentity.displayName) doesn't recognize this credential. Use the client's remote "
-                + "token or connect the app again from the client's Cloud section."))
-        let challenge = configuration.oauthContext.map(OAuthServer.challenge)
-            ?? "Bearer realm=\"\(AppIdentity.displayName)\""
+            id: nil, code: JSONRPC.authenticationFailed, message: configuration.texts.unauthorized))
+        let challenge = settings.oauthContext.map { OAuthServer.challenge($0, scope: configuration.scope) }
+            ?? "Bearer realm=\"\(configuration.identity.displayName)\""
         response.headers.append(("WWW-Authenticate", challenge))
         return response
     }
 }
 
-/// The configuration, read from the HTTP queue.
+/// The settings, read from the HTTP queue.
 private final class Box: @unchecked Sendable {
     private let lock = NSLock()
     private var stored: RemoteConfiguration?
@@ -441,4 +477,10 @@ private final class Box: @unchecked Sendable {
         get { lock.lock(); defer { lock.unlock() }; return stored }
         set { lock.lock(); stored = newValue; lock.unlock() }
     }
+}
+
+/// Carries a main-actor value across a queue hop that ends on the main actor.
+struct MainActorBox<Value>: @unchecked Sendable {
+    let value: Value
+    init(_ value: Value) { self.value = value }
 }

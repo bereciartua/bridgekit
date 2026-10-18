@@ -2,15 +2,22 @@ import Foundation
 
 /// An OAuth client's metadata document (Client ID Metadata Document, CIMD):
 /// the client ID is an https URL that serves this JSON.
-struct ClientMetadata: Equatable {
+public struct ClientMetadata: Equatable, Sendable {
     /// Must equal the URL the document was fetched from.
-    let clientID: String
-    let clientName: String?
-    let redirectURIs: [String]
-    let clientURI: String?
+    public let clientID: String
+    public let clientName: String?
+    public let redirectURIs: [String]
+    public let clientURI: String?
+
+    public init(clientID: String, clientName: String?, redirectURIs: [String], clientURI: String?) {
+        self.clientID = clientID
+        self.clientName = clientName
+        self.redirectURIs = redirectURIs
+        self.clientURI = clientURI
+    }
 }
 
-enum CIMDError: Error, Equatable {
+public enum CIMDError: Error, Equatable, Sendable {
     /// Not an https URL, or it has a fragment, user info or no path.
     case invalidURL
     /// The host resolved to a private, loopback, link-local or other
@@ -24,7 +31,7 @@ enum CIMDError: Error, Equatable {
     case network(String)
 
     /// One sentence for the browser page. Network details stay out of it.
-    var reason: String {
+    public var reason: String {
         switch self {
         case .invalidURL: return "Its client ID isn’t an https URL with a host name and a path."
         case .blockedAddress: return "Its host name doesn’t resolve to a public internet address."
@@ -41,7 +48,7 @@ enum CIMDError: Error, Equatable {
 /// Fetches client metadata documents. The app's fetcher is the first
 /// outbound HTTP the app makes, so it's tightly bounded (§22.6 of the plan).
 @MainActor
-protocol CIMDFetching: AnyObject {
+public protocol CIMDFetching: AnyObject {
     /// Calls `completion` once, on the main actor.
     func fetch(_ url: URL, completion: @escaping (Result<ClientMetadata, CIMDError>) -> Void)
 }

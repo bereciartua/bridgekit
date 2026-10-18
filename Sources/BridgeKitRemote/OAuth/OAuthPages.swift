@@ -1,24 +1,29 @@
+import BridgeKitCore
 import Foundation
 
 /// The browser pages of the authorization endpoint. Self-contained (no external resources), and the
 /// CSP lets only this response's own inline script and style run, so an escaping slip still can't
 /// execute script. Every interpolated value goes through `escape`.
-enum OAuthPages {
-    static func closed() -> HTTPResponse {
+struct OAuthPages {
+    /// The app's display name, in titles and headings.
+    let app: String
+    let texts: RemoteTexts
+
+    func closed() -> HTTPResponse {
         page(403, title: "Pairing isn't open", body: """
             <h1>Pairing isn’t open</h1>
-            <p>In \(escape(AppIdentity.displayName)) on your Mac, open the client you want to use and \
-            choose Connect a Cloud App. Then start connecting again from the app.</p>
+            <p>\(Self.escape(texts.pairingClosed))</p>
             """)
     }
 
-    static func error(_ status: Int, title: String, message: String) -> HTTPResponse {
-        page(status, title: title, body: "<h1>\(escape(title))</h1>\n<p>\(escape(message))</p>")
+    func error(_ status: Int, title: String, message: String) -> HTTPResponse {
+        page(status, title: title, body: "<h1>\(Self.escape(title))</h1>\n<p>\(Self.escape(message))</p>")
     }
 
     /// Shows the code the Mac also shows and polls `authorize/status` every 2 s until the user answers.
-    static func pairing(_ request: PairingRequest, clientName: String) -> HTTPResponse {
-        let nonce = randomNonce()
+    func pairing(_ request: PairingRequest, clientName: String) -> HTTPResponse {
+        let escape = Self.escape
+        let nonce = Self.randomNonce()
         let script = """
             (function () {
               var status = document.getElementById("status");
@@ -41,12 +46,11 @@ enum OAuthPages {
             })();
             """
         let body = """
-            <h1>Connect \(escape(request.appName)) to \(escape(AppIdentity.displayName))</h1>
-            <p>Check that \(escape(AppIdentity.displayName)) on your Mac shows this code, then choose \
-            Allow there.</p>
+            <h1>Connect \(escape(request.appName)) to \(escape(app))</h1>
+            <p>\(escape(texts.pairingPrompt))</p>
             <p class="code" aria-label="Pairing code">\(escape(request.code))</p>
             <dl>
-            <dt>Client</dt><dd>\(escape(clientName))</dd>
+            <dt>\(escape(texts.agentLabel))</dt><dd>\(escape(clientName))</dd>
             <dt>Returns to</dt><dd>\(escape(request.redirectHost))</dd>
             </dl>
             <p id="status" role="status">Waiting for you to answer on your Mac…</p>
@@ -80,8 +84,9 @@ enum OAuthPages {
         ("Cache-Control", "no-store"),
     ]
 
-    private static func page(_ status: Int, title: String, body: String, nonce: String = randomNonce(),
-                             dataRequest: String? = nil) -> HTTPResponse {
+    private func page(_ status: Int, title: String, body: String, nonce: String = Self.randomNonce(),
+                      dataRequest: String? = nil) -> HTTPResponse {
+        let escape = Self.escape
         let data = dataRequest.map { " data-request=\"\(escape($0))\"" } ?? ""
         let html = """
             <!doctype html>
@@ -90,8 +95,8 @@ enum OAuthPages {
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <meta name="referrer" content="no-referrer">
-            <title>\(escape(title)) – \(escape(AppIdentity.displayName))</title>
-            <style nonce="\(nonce)">\(style)</style>
+            <title>\(escape(title)) – \(escape(app))</title>
+            <style nonce="\(nonce)">\(Self.style)</style>
             </head>
             <body\(data)>
             <main>
@@ -107,7 +112,7 @@ enum OAuthPages {
         return HTTPResponse(status: status, headers: [
             ("Content-Type", "text/html; charset=utf-8"),
             ("Content-Security-Policy", policy),
-        ] + securityHeaders, body: Data(html.utf8))
+        ] + Self.securityHeaders, body: Data(html.utf8))
     }
 
     private static let style = """

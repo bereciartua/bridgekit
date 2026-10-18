@@ -1,3 +1,4 @@
+import BridgeKitCore
 import Foundation
 import Network
 import Security
@@ -8,9 +9,33 @@ import Security
 /// one; the connection then goes to that checked address, with TLS verified for the name. The
 /// connected address is checked again before any request bytes go out.
 @MainActor
-final class CIMDFetcher: CIMDFetching {
-    typealias Completion = (Result<ClientMetadata, CIMDError>) -> Void
+public final class CIMDFetcher: CIMDFetching {
+    public typealias Completion = (Result<ClientMetadata, CIMDError>) -> Void
     typealias Response = (status: Int, headers: [(String, String)], body: Data)
+
+    /// Test builds only: lets the harness's local HTTPS fixture through. An app
+    /// passes these only from its own test mode; normal builds pass nil, and
+    /// nothing else relaxes the guard.
+    public struct Testing: @unchecked Sendable {
+        public var allowLoopback: Bool
+        /// Skips the check before connecting, so tests can reach the one after it.
+        public var skipResolveCheck: Bool
+        /// A certificate to trust as the fixture's root.
+        public var anchor: SecCertificate?
+
+        public init(allowLoopback: Bool = false, skipResolveCheck: Bool = false, anchor: SecCertificate? = nil) {
+            self.allowLoopback = allowLoopback
+            self.skipResolveCheck = skipResolveCheck
+            self.anchor = anchor
+        }
+
+        /// A PEM certificate file's first certificate.
+        public static func certificate(pemFile path: String) -> SecCertificate? {
+            guard let pem = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
+            let base64 = pem.split(separator: "\n").filter { !$0.hasPrefix("-----") }.joined()
+            return Data(base64Encoded: base64).flatMap { SecCertificateCreateWithData(nil, $0 as CFData) }
+        }
+    }
 
     nonisolated static let maxBody = 16 * 1024
     nonisolated static let maxHeaderBytes = 8 * 1024
@@ -21,16 +46,22 @@ final class CIMDFetcher: CIMDFetching {
     static let maxCacheEntries = 64
 
     private let now: () -> Date
+    private let userAgent: String
+    private let testing: Testing?
     private var cache = [String: (metadata: ClientMetadata, expires: Date)]()
     private var waiting = [String: [Completion]]()
 
-    init(now: @escaping () -> Date = Date.init) {
+    /// `userAgent` is `RemoteBridgeConfiguration.userAgent` ("FunesVault/0.1.0").
+    public init(userAgent: String, testing: Testing? = nil, now: @escaping () -> Date = Date.init) {
+        self.userAgent = userAgent
+        self.testing = testing
         self.now = now
     }
 
-    func fetch(_ url: URL, completion: @escaping Completion) {
+    public func fetch(_ url: URL, completion: @escaping Completion) {
         let key = url.absoluteString
-        guard Self.validateClientIDURL(url), let request = CIMDRequest(url: url) else {
+        guard Self.validateClientIDURL(url), let request = CIMDRequest(url: url, userAgent: userAgent,
+                                                                       testing: testing) else {
             return Self.deliver(.failure(.invalidURL), to: completion)
         }
         if let hit = cache[key] {
@@ -366,27 +397,6 @@ final class CIMDFetcher: CIMDFetching {
     }
 }
 
-#if EVENTKIT_MCP_TEST
-/// Test-only: let the local HTTPS fixture through. Normal builds have no way to relax the guard.
-private enum CIMDTestHooks {
-    static var allowLoopback: Bool {
-        getenv("EVENTKIT_MCP_TEST_CIMD_ALLOW_LOOPBACK").map { String(cString: $0) } == "1"
-    }
-
-    /// Skips the check before connecting, so tests can reach the one after it.
-    static var skipResolveCheck: Bool {
-        getenv("EVENTKIT_MCP_TEST_CIMD_SKIP_RESOLVE_CHECK").map { String(cString: $0) } == "1"
-    }
-
-    static var anchor: SecCertificate? {
-        guard let path = getenv("EVENTKIT_MCP_TEST_CIMD_CA").map({ String(cString: $0) }),
-              let pem = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
-        let base64 = pem.split(separator: "\n").filter { !$0.hasPrefix("-----") }.joined()
-        return Data(base64Encoded: base64).flatMap { SecCertificateCreateWithData(nil, $0 as CFData) }
-    }
-}
-#endif
-
 /// One fetch, confined to its own queue; its result is delivered once, on the main actor.
 private final class CIMDRequest: @unchecked Sendable {
     private let clientID: String
@@ -399,25 +409,24 @@ private final class CIMDRequest: @unchecked Sendable {
     private var sent = false
     private var untried = [NWEndpoint.Host]()
     private var onDone: (@MainActor (Result<ClientMetadata, CIMDError>) -> Void)?
-    #if EVENTKIT_MCP_TEST
-    private let allowLoopback = CIMDTestHooks.allowLoopback
-    private let anchor = CIMDTestHooks.anchor
-    private let skipResolveCheck = CIMDTestHooks.skipResolveCheck
-    #endif
+    private let allowLoopback: Bool
+    private let anchor: SecCertificate?
+    private let skipResolveCheck: Bool
 
-    init?(url: URL) {
+    init?(url: URL, userAgent: String, testing: CIMDFetcher.Testing?) {
         guard let parts = URLComponents(string: url.absoluteString), let host = parts.encodedHost,
               let number = UInt16(exactly: parts.port ?? 443), let port = NWEndpoint.Port(rawValue: number)
         else { return nil }
         let target = parts.percentEncodedPath + (parts.percentEncodedQuery.map { "?\($0)" } ?? "")
         let authority = host + (parts.port.map { ":\($0)" } ?? "")
-        // The version is "–" when unbundled; header values stay ASCII.
-        let version = AppIdentity.version
-        let agent = version.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == ".") }
-            ? version : "0"
+        // Header values stay ASCII.
+        guard userAgent.utf8.allSatisfy({ (0x21...0x7E).contains($0) }) else { return nil }
         let head = "GET \(target) HTTP/1.1\r\nHost: \(authority)\r\nAccept: application/json\r\n"
-            + "Accept-Encoding: identity\r\nUser-Agent: EKBridge/\(agent)\r\n"
+            + "Accept-Encoding: identity\r\nUser-Agent: \(userAgent)\r\n"
             + "Connection: close\r\n\r\n"
+        allowLoopback = testing?.allowLoopback ?? false
+        anchor = testing?.anchor
+        skipResolveCheck = testing?.skipResolveCheck ?? false
         self.clientID = url.absoluteString
         self.host = host
         self.port = port
@@ -442,9 +451,7 @@ private final class CIMDRequest: @unchecked Sendable {
             return finish(.failure(.network("The name didn't resolve.")))
         }
         var checked = addresses.allSatisfy { allowed(.hostPort(host: $0, port: port)) }
-        #if EVENTKIT_MCP_TEST
         if skipResolveCheck { checked = true }
-        #endif
         guard checked else { return finish(.failure(.blockedAddress)) }
         // Each checked address in turn (an IPv6 address without a route falls back to IPv4), with a
         // shorter connect timeout when there's more than one, all within the overall 5 s.
@@ -500,7 +507,6 @@ private final class CIMDRequest: @unchecked Sendable {
         sec_protocol_options_add_tls_application_protocol(security, "http/1.1")
         // Every fetch evaluates the server's certificate in full: a resumed session skips that.
         sec_protocol_options_set_tls_resumption_enabled(security, false)
-        #if EVENTKIT_MCP_TEST
         if let anchor {
             let host = host
             sec_protocol_options_set_verify_block(security, { _, trust, complete in
@@ -511,7 +517,6 @@ private final class CIMDRequest: @unchecked Sendable {
                 complete(SecTrustEvaluateWithError(trust, nil))
             }, queue)
         }
-        #endif
         let tcp = NWProtocolTCP.Options()
         tcp.connectionTimeout = timeout
         tcp.noDelay = true
@@ -546,9 +551,7 @@ private final class CIMDRequest: @unchecked Sendable {
     }
 
     private func allowed(_ remote: NWEndpoint) -> Bool {
-        #if EVENTKIT_MCP_TEST
         if allowLoopback && CIMDFetcher.isLoopbackAddress(remote) { return true }
-        #endif
         return CIMDFetcher.isPublicAddress(remote)
     }
 

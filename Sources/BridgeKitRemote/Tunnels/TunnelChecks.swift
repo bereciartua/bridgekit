@@ -1,27 +1,34 @@
+import BridgeKitCore
 import Darwin
 import Foundation
 
-/// Is the tunnel running on this Mac? (plan 08 §5). Asks the tunnel's own
+/// Is the tunnel running on this Mac? Asks the tunnel's own
 /// tool, read-only: the `tailscale` CLI's status commands, cloudflared's
 /// metrics server, ngrok's agent API, and this user's process list. Nothing
 /// is started, stopped or changed, nothing leaves the Mac (HTTP goes to
 /// 127.0.0.1 only, without credentials), and the answer is display only.
-/// The UI-review build passes a fake.
-struct TunnelChecks {
-    /// Checks one tunnel for the Remote Access port; the answer arrives on the main queue.
-    var check: (TunnelProvider, Int, @escaping (TunnelHealth) -> Void) -> Void
+/// A UI-review build passes a fake.
+public struct TunnelChecks: Sendable {
+    public typealias Done = @MainActor @Sendable (TunnelHealth) -> Void
 
-    static let unavailable = TunnelChecks { _, _, done in DispatchQueue.main.async { done(.unknown) } }
+    /// Checks one tunnel for the Remote Access port; the answer arrives on the main actor.
+    public var check: @Sendable (TunnelProvider, Int, @escaping Done) -> Void
 
-    static let live = TunnelChecks { provider, port, done in
+    public init(check: @escaping @Sendable (TunnelProvider, Int, @escaping Done) -> Void) {
+        self.check = check
+    }
+
+    public static let unavailable = TunnelChecks { _, _, done in Task { @MainActor in done(.unknown) } }
+
+    public static let live = TunnelChecks { provider, port, done in
         DispatchQueue.global(qos: .utility).async {
             let health = TunnelProbes.check(provider, port: port)
-            DispatchQueue.main.async { done(health) }
+            Task { @MainActor in done(health) }
         }
     }
 }
 
-enum TunnelProbes {
+public enum TunnelProbes {
     /// Each command and each request gives up quickly, so a hung tool never
     /// holds up the page (§5.4).
     static let commandTimeout: TimeInterval = 2
@@ -29,7 +36,7 @@ enum TunnelProbes {
     static let cloudflaredMetricsPorts = 20241...20245
     static let ngrokAPIPorts = [4040, 4041, 4042]
 
-    static func check(_ provider: TunnelProvider, port: Int) -> TunnelHealth {
+    public static func check(_ provider: TunnelProvider, port: Int) -> TunnelHealth {
         switch provider {
         case .tailscaleFunnel: return tailscale(port: port)
         case .cloudflareTunnel: return cloudflared(quick: false, port: port)
@@ -182,7 +189,9 @@ enum RunningProcesses {
             guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size, info.pbi_uid == uid else { continue }
             var path = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
             guard proc_pidpath(pid, &path, UInt32(path.count)) > 0,
-                  (String(cString: path) as NSString).lastPathComponent == name,
+                  case let executable = String(decoding: path.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) },
+                                               as: UTF8.self),
+                  (executable as NSString).lastPathComponent == name,
                   let arguments = arguments(pid) else { continue }
             result.append(arguments)
         }

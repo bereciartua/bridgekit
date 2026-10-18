@@ -1,13 +1,13 @@
 import Foundation
 
-// Is the tunnel running on this Mac? (plan 08 §5). Pure parsers for what each
-// tunnel's own tool reports, and the words the app shows for it. The checks
-// that collect the input (TunnelChecks.swift) are read-only and local, and
-// the result is display only: it never changes what the server accepts.
+// Is the tunnel running on this Mac? Pure parsers for what each tunnel's own
+// tool reports, as typed results; each app words them. The checks that
+// collect the input (TunnelChecks.swift) are read-only and local, and the
+// result is display only: it never changes what the server accepts.
 
 /// What a tunnel's tool says about it, for the Remote Access port.
-enum TunnelHealth: Equatable {
-    enum NotRunningReason: Equatable {
+public enum TunnelHealth: Equatable, Sendable {
+    public enum NotRunningReason: Equatable, Sendable {
         /// The tool runs, but the tunnel isn't connected (Tailscale turned off,
         /// cloudflared not connected to Cloudflare yet).
         case stopped
@@ -32,21 +32,9 @@ enum TunnelHealth: Equatable {
     /// is the only signal.
     case unknown
 
-    enum Tone: Equatable { case ok, warn, neutral }
+    public enum Tone: Equatable, Sendable { case ok, warn, neutral }
 
-    /// The pill (plan 08 §1.2).
-    var label: String {
-        switch self {
-        case .running: String(localized: "Running")
-        case .wrongPort: String(localized: "Wrong port")
-        case .notPublic: String(localized: "Not public")
-        case .notRunning: String(localized: "Not running")
-        case .notInstalled: String(localized: "Not installed")
-        case .unknown: String(localized: "Can't check on this Mac")
-        }
-    }
-
-    var tone: Tone {
+    public var tone: Tone {
         switch self {
         case .running: .ok
         case .wrongPort, .notPublic, .notRunning: .warn
@@ -55,7 +43,7 @@ enum TunnelHealth: Equatable {
     }
 
     /// While Remote Access is on, these mean cloud agents can't get through (D10).
-    var warns: Bool {
+    public var warns: Bool {
         switch self {
         case .wrongPort, .notPublic, .notRunning: true
         case .running, .notInstalled, .unknown: false
@@ -64,77 +52,26 @@ enum TunnelHealth: Equatable {
 
     /// The sidebar badge's Down and the menu's "tunnel down" (D10): Remote
     /// Access is on with an address, and the tunnel in use warns.
-    static func isDown(remoteActive: Bool, health: TunnelHealth?) -> Bool {
+    public static func isDown(remoteActive: Bool, health: TunnelHealth?) -> Bool {
         remoteActive && health?.warns == true
     }
 
     /// The public address the tool reported, if any.
-    var address: String? {
+    public var address: String? {
         switch self {
         case .running(let address, _), .wrongPort(_, let address), .notPublic(let address): address
         case .notRunning, .notInstalled, .unknown: nil
         }
     }
 
-    /// The text next to the pill. `remotePort` is the Remote Access port,
-    /// `mcpPort` the local MCP server's.
-    func detail(_ provider: TunnelProvider, remotePort: Int, mcpPort: Int) -> String? {
-        switch self {
-        case .running(_, let port):
-            return String(localized: "on this Mac · forwards to \(String(port))")
-        case .wrongPort(let port, _):
-            return port == mcpPort
-                ? String(localized: "Forwards to \(String(port)), the local MCP port. Use \(String(remotePort)).")
-                : String(localized: "Forwards to \(String(port)). Use \(String(remotePort)).")
-        case .notPublic:
-            return provider == .tailscaleFunnel
-                ? String(localized: "Tailscale Serve is on, but Funnel isn't, so cloud agents can't reach it.")
-                : String(localized: "It's reachable only from your own network, so cloud agents can't reach it.")
-        case .notRunning(let reason):
-            switch reason {
-            case .loggedOut: return String(localized: "Tailscale is logged out. Open Tailscale and log in.")
-            case .funnelNotAllowed:
-                return String(localized: "Your tailnet policy doesn't allow Funnel for this Mac. Add the funnel node attribute in the Tailscale admin console.")
-            case .stopped:
-                return provider == .tailscaleFunnel
-                    ? String(localized: "Tailscale is turned off. Turn it on, then start Funnel.")
-                    : String(localized: "\(provider.name) runs, but isn't connected yet.")
-            case .noTunnel: return nil
-            }
-        case .notInstalled:
-            switch provider {
-            case .tailscaleFunnel: return String(localized: "Install Tailscale, or choose another tunnel.")
-            case .ngrok: return String(localized: "Install ngrok, or choose another tunnel.")
-            default: return String(localized: "Install cloudflared with brew install cloudflared, or choose another tunnel.")
-            }
-        case .unknown:
-            return nil
-        }
-    }
-
     /// Whether the start command helps: the tunnel isn't up, but nothing else is in the way.
-    var showsStartCommand: Bool {
+    public var showsStartCommand: Bool {
         if case .notRunning(let reason) = self { return reason == .noTunnel || reason == .stopped }
         return false
     }
 
-    /// The Status row's reason when the reachability test failed and this
-    /// check explains it (*Tailscale Funnel isn't running on this Mac.*).
-    func unreachableReason(_ provider: TunnelProvider, remotePort: Int) -> String? {
-        switch self {
-        case .notRunning: String(localized: "\(provider.name) isn't running on this Mac.")
-        case .wrongPort(let port, _):
-            String(localized: "\(provider.name) forwards to port \(String(port)), not \(String(remotePort)).")
-        case .notPublic: provider == .tailscaleFunnel
-            ? String(localized: "Tailscale Serve is on, but Funnel isn't.")
-            : String(localized: "\(provider.name) isn't public.")
-        case .notInstalled: String(localized: "\(provider.name) isn't installed on this Mac.")
-        case .running, .unknown: nil
-        }
-    }
-
     /// For the page's VoiceOver label and the live-test state.
-    var code: String {
+    public var code: String {
         switch self {
         case .running: "running"
         case .wrongPort: "wrongPort"
@@ -146,51 +83,12 @@ enum TunnelHealth: Equatable {
     }
 }
 
-extension TunnelProvider {
-    /// What the address looks like (D4): `.ts.net` is Tailscale Funnel,
-    /// `.trycloudflare.com` a quick tunnel, ngrok's domains ngrok. Nil when it
-    /// could be anything (a Cloudflare Tunnel or ngrok on your own domain).
-    static func detect(address: String?) -> TunnelProvider? {
-        guard let host = address.flatMap(URL.init(string:))?.host?.lowercased() else { return nil }
-        if host.hasSuffix(".ts.net") { return .tailscaleFunnel }
-        if host.hasSuffix(".trycloudflare.com") { return .cloudflareQuick }
-        if ngrokDomains.contains(where: { host.hasSuffix($0) }) { return .ngrok }
-        return nil
-    }
-
-    /// The name the reachability test reported (`detect(headers:)`'s name).
-    static func named(_ name: String?) -> TunnelProvider? {
-        guard let name else { return nil }
-        return allCases.first { $0.name == name }
-    }
-
-    /// The one command that starts the tunnel once it's set up, for the Tunnel
-    /// row's Not running state. Nil for Other tunnel.
-    func runCommand(port: Int, hostname: String?) -> String? {
-        switch self {
-        case .tailscaleFunnel, .cloudflareQuick: commands(port: port, hostname: hostname).first
-        case .cloudflareTunnel: "cloudflared tunnel run \(Self.cloudflareTunnelName)"
-        case .ngrok: commands(port: port, hostname: hostname).first { $0.hasPrefix("ngrok http ") }
-        case .other: nil
-        }
-    }
-
-    /// Where to get the tool, for Not installed.
-    var installLink: String? {
-        switch self {
-        case .tailscaleFunnel: "https://tailscale.com/download/mac"
-        case .ngrok: "https://ngrok.com/download"
-        case .cloudflareTunnel, .cloudflareQuick, .other: nil
-        }
-    }
-}
-
 /// The Tunnel row's name (D4): the tunnel that answered the last test, then
 /// what the address looks like, then the stored choice, so it can't disagree
 /// with the address. A test answered by an unrecognized tunnel ("Other")
 /// says less than the address or the choice, so it's used last.
-enum TunnelLabel {
-    static func resolve(lastTested: TunnelProvider?, address: String?, stored: TunnelProvider) -> TunnelProvider {
+public enum TunnelLabel {
+    public static func resolve(lastTested: TunnelProvider?, address: String?, stored: TunnelProvider) -> TunnelProvider {
         if let lastTested, lastTested != .other { return lastTested }
         if let detected = TunnelProvider.detect(address: address) { return detected }
         if lastTested == .other, stored != .other, address != nil {
@@ -204,8 +102,8 @@ enum TunnelLabel {
 
 /// Reads JSON a CLI printed, skipping anything before the first `{` (the
 /// `tailscale` CLI prints a version-mismatch warning on some installs).
-enum ToolJSON {
-    static func object(_ data: Data?) -> [String: Any]? {
+public enum ToolJSON {
+    public static func object(_ data: Data?) -> [String: Any]? {
         guard let data, let start = data.firstIndex(of: UInt8(ascii: "{")) else { return nil }
         return (try? JSONSerialization.jsonObject(with: data[start...])) as? [String: Any]
     }
@@ -213,7 +111,7 @@ enum ToolJSON {
     /// The port a forwarding target names: `http://127.0.0.1:47616`,
     /// `http://localhost:47616/`, `localhost:47616`, `127.0.0.1:47616` or `47616`.
     /// Nil for anything else, including targets on another machine.
-    static func localPort(_ target: String) -> Int? {
+    public static func localPort(_ target: String) -> Int? {
         var text = target.trimmingCharacters(in: .whitespaces).lowercased()
         for scheme in ["http://", "https://", "tcp://"] where text.hasPrefix(scheme) {
             text.removeFirst(scheme.count)
@@ -227,26 +125,26 @@ enum ToolJSON {
     }
 
     /// `https://<host>`, with `:<port>` unless it's 443.
-    static func origin(host: String, port: Int) -> String {
+    public static func origin(host: String, port: Int) -> String {
         "https://" + host.lowercased() + (port == 443 ? "" : ":\(port)")
     }
 }
 
 /// `tailscale status --json` and `tailscale funnel status --json`.
-enum TailscaleStatus {
+public enum TailscaleStatus {
     /// The environment for the `tailscale` CLI. Tailscale.app's binary is both
     /// the app and the CLI, and acts as the CLI only when it sees a shell
     /// (`SHLVL`, `TERM`) or `TAILSCALE_BE_CLI`. An app opened from Finder, at
     /// login or by an update has neither, so without the variable it answers
     /// "The Tailscale GUI failed to start" instead of JSON. Homebrew's CLI
     /// ignores it.
-    static func cliEnvironment(_ base: [String: String]) -> [String: String] {
+    public static func cliEnvironment(_ base: [String: String]) -> [String: String] {
         var environment = base
         environment["TAILSCALE_BE_CLI"] = "1"
         return environment
     }
 
-    static func parse(status: Data?, funnel: Data?, port: Int) -> TunnelHealth {
+    public static func parse(status: Data?, funnel: Data?, port: Int) -> TunnelHealth {
         guard let status = ToolJSON.object(status) else { return .unknown }
         switch status["BackendState"] as? String {
         case "Running": break
@@ -289,19 +187,25 @@ enum TailscaleStatus {
 
 /// One cloudflared metrics server (`127.0.0.1:20241…20245`): `/ready`,
 /// `/quicktunnel` and `/config`, as fetched.
-struct CloudflaredEndpoint: Equatable {
-    var ready: Data?
-    var quickTunnel: Data?
-    var config: Data?
+public struct CloudflaredEndpoint: Equatable, Sendable {
+    public var ready: Data?
+    public var quickTunnel: Data?
+    public var config: Data?
+
+    public init(ready: Data? = nil, quickTunnel: Data? = nil, config: Data? = nil) {
+        self.ready = ready
+        self.quickTunnel = quickTunnel
+        self.config = config
+    }
 }
 
 /// cloudflared: named tunnels and quick tunnels.
-enum CloudflaredStatus {
+public enum CloudflaredStatus {
     /// `quick` picks quick tunnels (`--url`, a trycloudflare.com address) or
     /// named ones. `processes` are the arguments of running cloudflared
     /// processes (the fallback when no metrics server answers);
     /// `configFile` is `~/.cloudflared/config.yml` (or `--config`'s file).
-    static func parse(quick: Bool, endpoints: [CloudflaredEndpoint], processes: [[String]], configFile: String?,
+    public static func parse(quick: Bool, endpoints: [CloudflaredEndpoint], processes: [[String]], configFile: String?,
                       port: Int, installed: Bool) -> TunnelHealth {
         let fileRules = configFile.map(ingress(yaml:)) ?? []
         var notReady = false
@@ -345,7 +249,7 @@ enum CloudflaredStatus {
     }
 
     /// `/config`'s `{"config": {"ingress": [{"hostname", "service"}]}}`.
-    static func ingress(json data: Data) -> [(hostname: String, port: Int)] {
+    public static func ingress(json data: Data) -> [(hostname: String, port: Int)] {
         let config = ToolJSON.object(data)?["config"] as? [String: Any]
         let rules = config?["ingress"] as? [[String: Any]] ?? []
         return rules.compactMap { rule in
@@ -356,7 +260,7 @@ enum CloudflaredStatus {
 
     /// The `ingress` rules of a config.yml: `hostname:` / `service:` pairs,
     /// read line by line (not a YAML parser; quotes and comments are dropped).
-    static func ingress(yaml text: String) -> [(hostname: String, port: Int)] {
+    public static func ingress(yaml text: String) -> [(hostname: String, port: Int)] {
         var rules = [(hostname: String, port: Int)]()
         var inIngress = false
         var hostname = ""
@@ -386,8 +290,8 @@ enum CloudflaredStatus {
 }
 
 /// ngrok's agent API: `GET /api/tunnels`.
-enum NgrokStatus {
-    static func parse(apiTunnels data: Data?, port: Int) -> TunnelHealth {
+public enum NgrokStatus {
+    public static func parse(apiTunnels data: Data?, port: Int) -> TunnelHealth {
         guard let object = ToolJSON.object(data), let tunnels = object["tunnels"] as? [[String: Any]] else {
             return .unknown
         }
@@ -407,20 +311,20 @@ enum NgrokStatus {
 
 /// The fallback when a tool's local status endpoint is off: the arguments of
 /// a running process (same user only).
-enum TunnelProcess {
+public enum TunnelProcess {
     /// `cloudflared tunnel --url http://127.0.0.1:47616` (or `--url=…`).
-    static func cloudflaredURLPort(_ args: [String]) -> Int? {
+    public static func cloudflaredURLPort(_ args: [String]) -> Int? {
         value(args, "--url").flatMap(ToolJSON.localPort)
     }
 
     /// `ngrok http 47616` (or `localhost:47616`, `http://localhost:47616`).
-    static func ngrokPort(_ args: [String]) -> Int? {
+    public static func ngrokPort(_ args: [String]) -> Int? {
         guard let index = args.firstIndex(of: "http"), index + 1 < args.count else { return nil }
         return args[(index + 1)...].first { !$0.hasPrefix("-") }.flatMap(ToolJSON.localPort)
     }
 
     /// `--config` of a named cloudflared tunnel, if given.
-    static func cloudflaredConfig(_ args: [String]) -> String? { value(args, "--config") }
+    public static func cloudflaredConfig(_ args: [String]) -> String? { value(args, "--config") }
 
     private static func value(_ args: [String], _ flag: String) -> String? {
         for (index, arg) in args.enumerated() {
@@ -432,29 +336,29 @@ enum TunnelProcess {
 }
 
 /// `https://host[:port]` from a tool's public URL, like `RemoteConfiguration.normalizedOrigin`.
-enum RemoteOriginText {
-    static func normalized(_ text: String) -> String? {
+public enum RemoteOriginText {
+    public static func normalized(_ text: String) -> String? {
         guard let url = URL(string: text.trimmingCharacters(in: .whitespaces)), url.scheme?.lowercased() == "https",
               let host = url.host, !host.isEmpty else { return nil }
         return "https://" + host.lowercased() + (url.port.map { ":\($0)" } ?? "")
     }
 }
 
-/// When the tunnel is checked in the background (plan 08 §5.4): every 3 s
+/// When the tunnel is checked in the background: every 3 s
 /// while a guide waits for the tunnel to start, every 60 s while Remote
 /// Access is on, never while it's off. Opening the page, waking the Mac and
 /// running Test check right away as well.
-enum TunnelCheckSchedule {
-    static let waitingInterval: TimeInterval = 3
-    static let onInterval: TimeInterval = 60
+public enum TunnelCheckSchedule {
+    public static let waitingInterval: TimeInterval = 3
+    public static let onInterval: TimeInterval = 60
 
-    static func interval(remoteOn: Bool, waitingForTunnel: Bool) -> TimeInterval? {
+    public static func interval(remoteOn: Bool, waitingForTunnel: Bool) -> TimeInterval? {
         guard remoteOn else { return nil }
         return waitingForTunnel ? waitingInterval : onInterval
     }
 
     /// A clock that went back counts as due.
-    static func isDue(lastCheck: Date?, now: Date, interval: TimeInterval?) -> Bool {
+    public static func isDue(lastCheck: Date?, now: Date, interval: TimeInterval?) -> Bool {
         guard let interval else { return false }
         guard let lastCheck else { return true }
         return now.timeIntervalSince(lastCheck) >= interval || now < lastCheck
@@ -463,8 +367,8 @@ enum TunnelCheckSchedule {
 
 /// Step 2 of a guide (first setup and Switch Tunnel…) while you start the
 /// tunnel: what it shows, and when it moves on by itself (D8). The step
-/// itself still comes from `RemoteGuide.step`.
-enum TunnelStartState: Equatable {
+/// itself still comes from the app's guide.
+public enum TunnelStartState: Equatable, Sendable {
     /// Remote Access is off: turn it on first.
     case turnOn
     /// Checking every 3 s: *Waiting for Tailscale Funnel…*
@@ -476,7 +380,7 @@ enum TunnelStartState: Equatable {
     /// Other tunnel, not installed, or the check can't tell: I've Started It.
     case cantCheck(TunnelHealth?)
 
-    static func make(remoteOn: Bool, provider: TunnelProvider, health: TunnelHealth?) -> TunnelStartState {
+    public static func make(remoteOn: Bool, provider: TunnelProvider, health: TunnelHealth?) -> TunnelStartState {
         guard remoteOn else { return .turnOn }
         if provider == .other { return .cantCheck(nil) }
         switch health {
@@ -490,37 +394,20 @@ enum TunnelStartState: Equatable {
 
     /// Moves on to step 3 by itself only once per entry into step 2 from
     /// step 1: after Back from step 3 it shows Continue instead.
-    func autoAdvances(advancedThisEntry: Bool) -> Bool {
+    public func autoAdvances(advancedThisEntry: Bool) -> Bool {
         if case .found = self { return !advancedThisEntry }
         return false
     }
 
     /// I've Started It: only when the check can't tell.
-    var offersStarted: Bool {
+    public var offersStarted: Bool {
         if case .cantCheck = self { return true }
         return false
     }
 
     /// Continue: found, after Back from step 3.
-    var offersContinue: Bool {
+    public var offersContinue: Bool {
         if case .found = self { return true }
         return false
-    }
-}
-
-extension TunnelProvider {
-    /// Cloudflare Tunnel and ngrok ask for the hostname first; the commands
-    /// and config.yml use it, never the address in use.
-    var asksForHostname: Bool { self == .cloudflareTunnel || self == .ngrok }
-
-    var hostnamePlaceholder: String { self == .ngrok ? "<your-dev-domain>" : "mcp.example.com" }
-
-    /// The hostname a typed value means: no scheme, path or spaces.
-    static func hostname(_ text: String) -> String? {
-        var value = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if let range = value.range(of: "://") { value = String(value[range.upperBound...]) }
-        value = String(value.prefix { $0 != "/" })
-        guard !value.isEmpty, !value.contains(" "), value.contains(".") else { return nil }
-        return value
     }
 }

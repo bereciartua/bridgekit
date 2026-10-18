@@ -1,3 +1,4 @@
+import BridgeKitCore
 import CryptoKit
 import Darwin
 import Foundation
