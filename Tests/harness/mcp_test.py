@@ -355,6 +355,7 @@ def run_core(h, catalog, contract):
     check("batch rejected", status == 400 and body["error"]["code"] == -32600 and body["id"] is None, body)
     status, _, body, _ = c.raw(body=b"{nope")
     check("parse error", status == 400 and body["error"]["code"] == -32700, body)
+    run_id_cap(c, h)
     status, _, _, data = c.raw(body={"jsonrpc": "2.0", "id": 1, "result": {}})
     check("client response 202", status == 202 and data == b"", status)
     m.close()
@@ -362,6 +363,33 @@ def run_core(h, catalog, contract):
     run_http_statuses(h)
     run_concurrency(h)
     c.close()
+
+
+def run_id_cap(c, h):
+    # Ids are capped at 1,024 bytes as the response writes them, so an app
+    # can budget exactly; the call carries its id.
+    def echo(rid):
+        message = {"jsonrpc": "2.0", "id": rid, "method": "tools/call",
+                   "params": {"name": "echo", "arguments": {"text": "id"}}}
+        status, _, body, _ = c.raw(body=message, headers={"MCP-Protocol-Version": LEGACY})
+        return status, body
+    for rid, size in [("x" * 1022, 1024), ('"' * 511, 1024), ("é" * 511, 1024), ("🙂" * 255, 1022)]:
+        status, body = echo(rid)
+        check("id at the cap", status == 200 and body["id"] == rid and body["result"]["isError"] is False,
+              (status, len(rid)))
+        row = h.activity()[0]
+        check("call carries its id", row.get("id") == rid and row.get("idBytes") == size, row.get("idBytes"))
+    for rid in ["x" * 1023, '"' * 512, "é" * 512, "🙂" * 256, "x" * 60000]:
+        status, body = echo(rid)
+        check("id over the cap", status == 400 and body["id"] is None and body["error"]["code"] == -32600 and
+              "1024 bytes" in body["error"]["message"] and "result" not in body, (status, len(rid)))
+    status, _, body, _ = c.raw(body={"jsonrpc": "1.0", "id": "x" * 1023, "method": "ping"})
+    check("over-cap id not echoed in other errors", status == 400 and body["id"] is None, body)
+    for rid, size in [(2**63 - 1, 19), (-2**63, 20), (0, 1)]:
+        status, body = echo(rid)
+        row = h.activity()[0]
+        check("integer id unaffected", status == 200 and body["id"] == rid and isinstance(body["id"], int) and
+              row.get("id") == rid and row.get("idBytes") == size, (body, row))
 
 
 def run_http_statuses(h):
@@ -455,23 +483,41 @@ def rss_kb(pid):
 
 
 def run_hardening(h):
-    # A client that pipelines without reading replies can't grow memory:
-    # the server stops reading while a few requests wait.
+    # A client that pipelines without reading replies can't grow memory: the
+    # server stops reading once its replies back up, and closes the connection
+    # when the stack hasn't taken a reply in 30 s.
     before = rss_kb(h.proc.pid)
-    raw = socket.create_connection(("127.0.0.1", h.port))
-    raw.setblocking(False)
+    flood = socket.create_connection(("127.0.0.1", h.port))
+    flood.setblocking(False)
     chunk = b"GET /x HTTP/1.1\r\nHost: a\r\n\r\n" * 2000
-    sent, deadline = 0, time.time() + 3
-    while time.time() < deadline:
+    sent, dropped = 0, False
+    started = progressed = time.time()
+    # Pour until the server stops reading (no progress for 1.5 s), for at most 10 s.
+    while time.time() - progressed < 1.5 and time.time() - started < 10:
         try:
-            sent += raw.send(chunk)
+            # Resume mid-chunk after a partial send, so every request is well-formed.
+            sent += flood.send(chunk[sent % len(chunk):])
+            progressed = time.time()
         except BlockingIOError:
             time.sleep(0.01)
         except (BrokenPipeError, ConnectionResetError):
-            break  # The server may drop a client that floods it; also bounded.
+            dropped = True
+            break
+    # The server answers what the socket buffers hold, then stalls: its count
+    # stops. TCP's first zero-window probe (about 5 s in) can let a few more
+    # replies through, so the count must hold for 6 s.
+    answered, stalled = h.control(cmd="counters")["requests"], time.time()
+    while time.time() - stalled < 6 and time.time() - started < 40:
+        time.sleep(0.25)
+        now = h.control(cmd="counters")["requests"]
+        if now != answered:
+            answered, stalled = now, time.time()
     grown = rss_kb(h.proc.pid) - before
-    raw.close()
-    check("pipelined flood is bounded", grown < 50_000, f"sent {sent} bytes, RSS grew {grown} KB")
+    detail = f"sent {sent} bytes in {progressed - started:.1f} s, stalled after {stalled - started:.1f} s, " \
+             f"RSS grew {grown} KB"
+    check("well-formed flood isn't dropped", not dropped, detail)
+    check("pipelined flood stops being read", progressed - started < 8.5 and stalled - started < 34, detail)
+    check("pipelined flood is bounded", grown < 50_000, detail)
     # A trickle of one byte every 3 s doesn't extend the 10 s header deadline.
     raw = socket.create_connection(("127.0.0.1", h.port))
     started = time.time()
@@ -522,6 +568,22 @@ def run_hardening(h):
         owner = json.load(f)["pid"]
     check("second instance keeps the endpoint file", second.returncode != 0 and owner == h.proc.pid,
           (second.returncode, owner))
+    # The flood's client never read: the write deadline closes it 30 s after
+    # the server stalled.
+    time.sleep(max(0.0, stalled + 33 - time.time()))
+    flood.setblocking(True)
+    flood.settimeout(5)
+    closed = False
+    try:
+        while flood.recv(1 << 20):
+            pass
+        closed = True
+    except ConnectionResetError:
+        closed = True
+    except socket.timeout:
+        pass
+    check("non-reading client closed after 30 s", closed, round(time.time() - stalled, 1))
+    flood.close()
 
 
 def run_concurrency(h):

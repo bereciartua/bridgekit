@@ -26,7 +26,7 @@ macOS 14 or later, Swift 6, no dependencies. Apache-2.0.
 ## Use
 
 ```swift
-.package(url: "https://github.com/bereciartua/bridgekit", exact: "0.1.0")
+.package(url: "https://github.com/bereciartua/bridgekit", exact: "0.1.1")
 ```
 
 Apps pin an exact version. Breaking changes bump the minor version while in 0.x.

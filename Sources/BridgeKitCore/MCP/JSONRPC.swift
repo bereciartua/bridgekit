@@ -21,6 +21,20 @@ public enum JSONRPCID: Equatable, Hashable, Sendable {
         }
     }
 
+    /// The bytes the id takes in a response, as `JSONRPC.encode` writes it:
+    /// a string's quotes and escapes included (`"a\"b"` is 6), an integer's
+    /// digits and sign (at most 20).
+    public var encodedByteCount: Int {
+        switch self {
+        case .int(let value): return String(value).utf8.count
+        case .string:
+            // Inside an array, so the writer takes it on every macOS version.
+            guard let data = try? JSONSerialization.data(withJSONObject: [json], options: JSONRPC.writingOptions)
+            else { return .max }
+            return data.count - 2
+        }
+    }
+
     /// Strings and whole numbers only; null, booleans and fractions are invalid.
     public init?(json value: Any) {
         if let text = value as? String {
@@ -55,6 +69,9 @@ public enum JSONRPCParseError: Error, Equatable {
     /// The request was malformed but its ID could be read, so the error can
     /// name it.
     case invalidRequestWithID(JSONRPCID)
+    /// The id is longer than the cap once encoded. Answered as an invalid
+    /// request with id null, since echoing it is what the cap prevents.
+    case idTooLong
 }
 
 public enum JSONRPC {
@@ -69,11 +86,20 @@ public enum JSONRPC {
     public static let headerMismatch = -32020
     public static let unsupportedProtocolVersion = -32022
 
-    public static func parse(_ body: Data) -> Result<JSONRPCMessage, JSONRPCParseError> {
+    /// The longest id accepted, in encoded bytes (`JSONRPCID.encodedByteCount`),
+    /// so an app can budget a response exactly. Real clients send short
+    /// counters or UUIDs.
+    public static let defaultMaxIDBytes = 1_024
+
+    /// `maxIDBytes` applies to every message with an id, before any error
+    /// that would echo it.
+    public static func parse(_ body: Data, maxIDBytes: Int = defaultMaxIDBytes)
+        -> Result<JSONRPCMessage, JSONRPCParseError> {
         guard let value = try? JSONSerialization.jsonObject(with: body, options: [.fragmentsAllowed])
         else { return .failure(.parse) }
         guard let object = value as? [String: Any] else { return .failure(.invalidRequest) }
         let id = object["id"].flatMap(JSONRPCID.init(json:))
+        if let id, id.encodedByteCount > maxIDBytes { return .failure(.idTooLong) }
         guard object["jsonrpc"] as? String == "2.0" else {
             return .failure(id.map(JSONRPCParseError.invalidRequestWithID) ?? .invalidRequest)
         }
@@ -90,8 +116,8 @@ public enum JSONRPC {
         case let value as [String: Any]: params = value
         default: return .failure(id.map(JSONRPCParseError.invalidRequestWithID) ?? .invalidRequest)
         }
-        guard let rawID = object["id"] else { return .success(.notification(method: method, params: params)) }
-        guard let id = JSONRPCID(json: rawID) else { return .failure(.invalidRequest) }
+        guard object["id"] != nil else { return .success(.notification(method: method, params: params)) }
+        guard let id else { return .failure(.invalidRequest) }
         return .success(.request(id: id, method: method, params: params))
     }
 
@@ -110,9 +136,10 @@ public enum JSONRPC {
         return encode(object)
     }
 
+    static let writingOptions: JSONSerialization.WritingOptions = [.sortedKeys, .withoutEscapingSlashes]
+
     public static func encode(_ object: Any) -> Data {
-        (try? JSONSerialization.data(withJSONObject: object,
-                                     options: [.sortedKeys, .withoutEscapingSlashes]))
+        (try? JSONSerialization.data(withJSONObject: object, options: writingOptions))
             ?? Data(#"{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"Internal error"}}"#.utf8)
     }
 }

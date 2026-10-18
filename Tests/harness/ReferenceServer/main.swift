@@ -29,6 +29,9 @@ struct ActivityRow {
     let outcome: String
     let agentID: String?
     let agent: String?
+    /// The call's JSON-RPC id and what it costs the response.
+    let id: JSONRPCID?
+    let idBytes: Int?
 }
 
 @MainActor
@@ -44,7 +47,7 @@ final class App {
 
     func record(_ command: String, _ outcome: String, _ call: ToolCall?) {
         activity.insert(ActivityRow(command: command, outcome: outcome, agentID: call?.agent.id,
-                                    agent: call?.agentName), at: 0)
+                                    agent: call?.agentName, id: call?.id, idBytes: call?.id.encodedByteCount), at: 0)
     }
 
     /// Waits for `answer`, a cancellation, or (approval mode "timeout") nothing.
@@ -303,6 +306,7 @@ final class Harness {
                 var value: [String: Any] = ["command": row.command, "outcome": row.outcome,
                                             "agentID": row.agentID as Any? ?? NSNull()]
                 if let agent = row.agent { value["agent"] = agent }
+                if let id = row.id, let bytes = row.idBytes { (value["id"], value["idBytes"]) = (id.json, bytes) }
                 return value
             }]
         case "pause":
