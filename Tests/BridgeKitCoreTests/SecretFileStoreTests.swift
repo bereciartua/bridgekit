@@ -171,13 +171,19 @@ struct SecretFileStoreTests {
         #expect(try FileManager.default.contentsOfDirectory(atPath: elsewhere.root.path).isEmpty)
     }
 
-    @Test("a private folder owned by another user is refused")
-    func otherOwner() throws {
-        // /var/root is root's own 0700 folder: only the owner check can refuse it.
-        let parent = URL(fileURLWithPath: "/private/var/root")
+    /// A 0700 folder owned by another user, so only the owner check can refuse
+    /// it. /var/root usually is; GitHub's macOS runners open it up, so
+    /// /var/audit is the fallback.
+    static let foreignPrivateFolder = ["/private/var/root", "/private/var/audit"].first { path in
         var info = stat()
-        try #require(lstat(parent.path, &info) == 0 && info.st_uid != getuid() && info.st_mode & 0o077 == 0,
-                     "needs a private folder owned by another user")
+        return lstat(path, &info) == 0 && info.st_mode & S_IFMT == S_IFDIR && info.st_uid != getuid()
+            && info.st_mode & 0o077 == 0
+    }
+
+    @Test("a private folder owned by another user is refused",
+          .enabled(if: foreignPrivateFolder != nil, "needs a private folder owned by another user"))
+    func otherOwner() throws {
+        let parent = URL(fileURLWithPath: try #require(Self.foreignPrivateFolder))
         let store = SecretFileStore(parent: parent, folderName: "keys")
         let id = UUID().uuidString
         #expect(store.status(clientID: id, kind: .mcpKey) == .unsafe)
