@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 (unreleased)
+## 0.2.0
 
 - New product, `BridgeKitRemote`: EK Bridge's Remote Access tier, moved from EK Bridge at
   e753b22 (0.11.2 plus BridgeKit 0.1.1) with its tests. The Remote Access listener, its HTTP
