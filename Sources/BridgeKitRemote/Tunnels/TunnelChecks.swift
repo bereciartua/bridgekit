@@ -11,14 +11,15 @@ import Foundation
 public struct TunnelChecks: Sendable {
     public typealias Done = @MainActor @Sendable (TunnelCheckResult) -> Void
 
-    /// Checks one tunnel for the Remote Access port; the answer arrives on the main actor.
-    public var check: @Sendable (TunnelProvider, Int, @escaping Done) -> Void
+    /// Checks one tunnel for the Remote Access port and its public paths
+    /// (`RemoteConfiguration.publicPaths`); the answer arrives on the main actor.
+    public var check: @Sendable (TunnelProvider, Int, [String], @escaping Done) -> Void
 
-    public init(check: @escaping @Sendable (TunnelProvider, Int, @escaping Done) -> Void) {
+    public init(check: @escaping @Sendable (TunnelProvider, Int, [String], @escaping Done) -> Void) {
         self.check = check
     }
 
-    public static let unavailable = TunnelChecks { _, _, done in
+    public static let unavailable = TunnelChecks { _, _, _, done in
         Task { @MainActor in done(TunnelCheckResult(health: .unknown)) }
     }
 
@@ -27,9 +28,9 @@ public struct TunnelChecks: Sendable {
     /// `mistakenPorts`: local ports a Funnel entry forwards to only by mistake, such as the app's
     /// own local MCP port (`TailscaleStatus.parse`).
     public static func live(mistakenPorts: Set<Int>) -> TunnelChecks {
-        TunnelChecks { provider, port, done in
+        TunnelChecks { provider, port, paths, done in
             DispatchQueue.global(qos: .utility).async {
-                let result = TunnelProbes.check(provider, port: port, mistakenPorts: mistakenPorts)
+                let result = TunnelProbes.check(provider, port: port, paths: paths, mistakenPorts: mistakenPorts)
                 Task { @MainActor in done(result) }
             }
         }
@@ -44,9 +45,10 @@ public enum TunnelProbes {
     static let cloudflaredMetricsPorts = 20241...20245
     static let ngrokAPIPorts = [4040, 4041, 4042]
 
-    public static func check(_ provider: TunnelProvider, port: Int, mistakenPorts: Set<Int> = []) -> TunnelCheckResult {
+    public static func check(_ provider: TunnelProvider, port: Int, paths: [String],
+                             mistakenPorts: Set<Int> = []) -> TunnelCheckResult {
         switch provider {
-        case .tailscaleFunnel: return tailscale(port: port, mistakenPorts: mistakenPorts)
+        case .tailscaleFunnel: return tailscale(port: port, paths: paths, mistakenPorts: mistakenPorts)
         case .cloudflareTunnel: return TunnelCheckResult(health: cloudflared(quick: false, port: port))
         case .cloudflareQuick: return TunnelCheckResult(health: cloudflared(quick: true, port: port))
         case .ngrok: return TunnelCheckResult(health: ngrok(port: port))
@@ -60,7 +62,7 @@ public enum TunnelProbes {
     static let tailscaleCandidates = ["/Applications/Tailscale.app/Contents/MacOS/Tailscale",
                                       "/opt/homebrew/bin/tailscale", "/usr/local/bin/tailscale"]
 
-    static func tailscale(port: Int, mistakenPorts: Set<Int>) -> TunnelCheckResult {
+    static func tailscale(port: Int, paths: [String], mistakenPorts: Set<Int>) -> TunnelCheckResult {
         guard let cli = locate("tailscale", candidates: tailscaleCandidates) else {
             return TunnelCheckResult(health: .notInstalled)
         }
@@ -73,7 +75,7 @@ public enum TunnelProbes {
                                        environment: environment, mergeErrors: false)
         return TailscaleStatus.result(status: Data(status.output.utf8),
                                       funnel: funnel.flatMap { $0.timedOut ? nil : Data($0.output.utf8) }, port: port,
-                                      mistakenPorts: mistakenPorts)
+                                      paths: paths, mistakenPorts: mistakenPorts)
     }
 
     // MARK: cloudflared

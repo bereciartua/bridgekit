@@ -1,0 +1,41 @@
+{
+  "TCP": {
+    "443": {
+      "HTTPS": true
+    },
+    "8443": {
+      "HTTPS": true
+    }
+  },
+  "Web": {
+    "my-mac.tail1234.ts.net:443": {
+      "Handlers": {
+        "/": {
+          "Proxy": "http://127.0.0.1:47616"
+        },
+        "/r/q7Zk2vN4bXwP9sL1mT6hYa": {
+          "Proxy": "http://127.0.0.1:47627/r/q7Zk2vN4bXwP9sL1mT6hYa"
+        },
+        "/.well-known/oauth-protected-resource/r/q7Zk2vN4bXwP9sL1mT6hYa": {
+          "Proxy": "http://127.0.0.1:47627/.well-known/oauth-protected-resource/r/q7Zk2vN4bXwP9sL1mT6hYa"
+        },
+        "/.well-known/oauth-authorization-server/r/q7Zk2vN4bXwP9sL1mT6hYa": {
+          "Proxy": "http://127.0.0.1:47627/.well-known/oauth-authorization-server/r/q7Zk2vN4bXwP9sL1mT6hYa"
+        },
+        "/.well-known/openid-configuration/r/q7Zk2vN4bXwP9sL1mT6hYa": {
+          "Proxy": "http://127.0.0.1:47627/.well-known/openid-configuration/r/q7Zk2vN4bXwP9sL1mT6hYa"
+        }
+      }
+    },
+    "my-mac.tail1234.ts.net:8443": {
+      "Handlers": {
+        "/": {
+          "Proxy": "http://127.0.0.1:4000"
+        }
+      }
+    }
+  },
+  "AllowFunnel": {
+    "my-mac.tail1234.ts.net:443": true
+  }
+}

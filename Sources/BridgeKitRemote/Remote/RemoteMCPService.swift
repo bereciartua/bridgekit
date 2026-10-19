@@ -11,6 +11,11 @@ public struct RemoteConfiguration: Equatable, Sendable {
 
     public var secretPrefix: String { "/r/" + secret }
 
+    /// Every path this listener answers is under one of these (`RemotePaths`). A tunnel that
+    /// routes by path, such as several apps sharing Tailscale Funnel's port 443, forwards exactly
+    /// these to this port.
+    public var publicPaths: [String] { RemotePaths.paths(secretPrefix: secretPrefix) }
+
     /// While Switch Tunnel… or Address ▸ Edit… tests a new address (plan 08
     /// T05): accepted for the health check only, never for MCP or OAuth, and
     /// never saved. Nil otherwise.
@@ -103,7 +108,9 @@ public enum RemoteHTTPGate {
         let route: String
         if path.hasPrefix("/.well-known/") {
             // Discovery documents insert the issuer path after the well-known name.
-            guard let range = path.range(of: "/r/"), secretMatches(path[range.lowerBound...], prefix) else {
+            guard RemotePaths.discoveryDocuments.contains(where: {
+                secretMatches(path[...], "/.well-known/" + $0 + prefix)
+            }) else {
                 return .respond(notFound(), close: false)
             }
             route = "oauth"

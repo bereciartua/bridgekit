@@ -117,7 +117,7 @@ public struct TunnelSwitchSummary: Equatable, Sendable {
 
     /// `offCommands` are the app's commands that turn a tunnel off (only Funnel keeps
     /// running in the background), given the tunnel, the Remote Access port and the address being
-    /// left (its port is Funnel's public port: `TailscaleFunnelCommand.publicPort(fromAddress:)`).
+    /// left. For Funnel: `TailscaleFunnelCommand.off(_:address:paths:)`.
     public static func make(_ change: TunnelSwitch, newOrigin: String, port: Int, remoteTokenClients: [String],
                             oauthApps: [String],
                             offCommands: (TunnelProvider, Int, String) -> [String]) -> TunnelSwitchSummary {
