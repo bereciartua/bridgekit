@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.3.0
+
+Several apps can now share Tailscale Funnel on one Mac. Funes Vault and EK Bridge both use it,
+and each app's guide used to offer `tailscale funnel --bg <port>`, which takes port 443 and
+replaces whatever another app serves there.
+
+- `FunnelPorts` reads every entry of `tailscale funnel status --json`: Funnel, tailnet-only Serve
+  and TCP forwarders, by public port. `publicPort` is where Remote Access already runs, else the
+  first of 443, 8443 and 10000 with nothing served on it; `inTheWay` lists what it passed over.
+- `TailscaleFunnelCommand` gives the start and off commands for a public port (443 keeps the
+  short form) and the port in an address.
+- Breaking:
+  - `TunnelChecks.Done` receives a `TunnelCheckResult` (the health, plus `FunnelPorts` for
+    Tailscale) instead of a `TunnelHealth`.
+  - A Funnel entry that forwards to another local port is no longer `.wrongPort`: it belongs to
+    another app. `.wrongPort` is now only for the ports an app names in `mistakenPorts`
+    (`TunnelChecks.live(mistakenPorts:)`, `TailscaleStatus.parse(…mistakenPorts:)`), such as its
+    local MCP port.
+  - New `TunnelHealth.NotRunningReason.allPortsTaken`.
+  - `TunnelSwitchSummary.make`'s `offCommands` also gets the address being left, so the off
+    command targets its port.
+
 ## 0.2.0
 
 - New product, `BridgeKitRemote`: EK Bridge's Remote Access tier, moved from EK Bridge at

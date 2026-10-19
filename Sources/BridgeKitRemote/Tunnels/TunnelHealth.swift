@@ -17,6 +17,9 @@ public enum TunnelHealth: Equatable, Sendable {
         case funnelNotAllowed
         /// No tunnel at all: start it.
         case noTunnel
+        /// Tailscale Funnel: other apps on this Mac already serve all three public ports
+        /// (`FunnelPorts.publicPorts`), so starting Funnel would replace one of them.
+        case allPortsTaken
     }
 
     /// Forwards to the Remote Access port. `address` is its public https
@@ -144,7 +147,10 @@ public enum TailscaleStatus {
         return environment
     }
 
-    public static func parse(status: Data?, funnel: Data?, port: Int) -> TunnelHealth {
+    /// `mistakenPorts` are local ports a Funnel entry forwards to only by mistake, such as the
+    /// app's own local MCP port: those are `.wrongPort`. Any other entry belongs to another app on
+    /// this Mac and isn't this tunnel at all (`FunnelPorts` steers around it).
+    public static func parse(status: Data?, funnel: Data?, port: Int, mistakenPorts: Set<Int> = []) -> TunnelHealth {
         guard let status = ToolJSON.object(status) else { return .unknown }
         switch status["BackendState"] as? String {
         case "Running": break
@@ -153,35 +159,33 @@ public enum TailscaleStatus {
         default: return .unknown
         }
         let me = status["Self"] as? [String: Any]
-        guard let config = ToolJSON.object(funnel) else { return .unknown }
-        let web = config["Web"] as? [String: Any] ?? [:]
-        let allowFunnel = config["AllowFunnel"] as? [String: Any] ?? [:]
-        // Each served host:port and the local ports its handlers forward to;
-        // 443 first, so the usual address wins.
-        let served: [(key: String, host: String, port: Int, targets: [Int], funnel: Bool)] = web.compactMap { key, value in
-            guard let colon = key.lastIndex(of: ":"), let servePort = Int(key[key.index(after: colon)...]) else { return nil }
-            let host = String(key[..<colon])
-            let handlers = (value as? [String: Any])?["Handlers"] as? [String: Any] ?? [:]
-            let targets = handlers.values.compactMap { ($0 as? [String: Any])?["Proxy"] as? String }
-                .compactMap(ToolJSON.localPort)
-            return (key, host, servePort, targets, allowFunnel[key] as? Bool == true)
-        }.sorted { ($0.port == 443 ? 0 : 1, $0.port) < ($1.port == 443 ? 0 : 1, $1.port) }
-        if let entry = served.first(where: { $0.funnel && $0.targets.contains(port) }) {
-            return .running(address: ToolJSON.origin(host: entry.host, port: entry.port), port: port)
+        guard let ports = FunnelPorts.parse(funnel: funnel, port: port) else { return .unknown }
+        if let entry = ports.running {
+            return .running(address: entry.address, port: port)
         }
         let capMap = me?["CapMap"] as? [String: Any]
         let capabilities = me?["Capabilities"] as? [String] ?? []
         let funnelAllowed = capMap.map { $0.keys.contains("funnel") } ?? true || capabilities.contains("funnel")
         if !funnelAllowed { return .notRunning(reason: .funnelNotAllowed) }
-        if let entry = served.first(where: { $0.targets.contains(port) }) {
-            return .notPublic(address: ToolJSON.origin(host: entry.host, port: entry.port))
+        if let entry = ports.entries.first(where: { $0.targets.contains(port) }) {
+            return .notPublic(address: entry.address)
         }
-        // Only Funnel entries count as "this tunnel, at the wrong port": a
-        // Serve entry for another app on this Mac isn't shown (plan 08 §5.5).
-        if let entry = served.first(where: { $0.funnel && !$0.targets.isEmpty }) {
-            return .wrongPort(port: entry.targets.min()!, address: ToolJSON.origin(host: entry.host, port: entry.port))
+        for entry in ports.entries where entry.funnel {
+            if let mistaken = entry.targets.first(where: mistakenPorts.contains) {
+                return .wrongPort(port: mistaken, address: entry.address)
+            }
         }
+        if ports.publicPort == nil { return .notRunning(reason: .allPortsTaken) }
         return .notRunning(reason: .noTunnel)
+    }
+
+    /// The health and the public ports in one answer, for the check.
+    public static func result(status: Data?, funnel: Data?, port: Int, mistakenPorts: Set<Int> = []) -> TunnelCheckResult {
+        let health = parse(status: status, funnel: funnel, port: port, mistakenPorts: mistakenPorts)
+        switch health {
+        case .unknown, .notInstalled: return TunnelCheckResult(health: health)
+        default: return TunnelCheckResult(health: health, funnel: FunnelPorts.parse(funnel: funnel, port: port))
+        }
     }
 }
 
