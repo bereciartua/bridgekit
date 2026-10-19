@@ -37,3 +37,32 @@ Tests:
 Not moved (each store in EK Bridge keeps its own copy for now): the inline private-file read
 and write helpers in `ActivityStore`, `ClientRegistry`, `WriteJournal` and `LocalBridge`.
 `SafePath` covers new code.
+
+## BridgeKitRemote (0.2.0)
+
+Every file in `Sources/BridgeKitRemote` was moved from EK Bridge at commit
+`e753b221a6646e6420eb2fe382780bea88493841` (0.11.2 plus BridgeKit 0.1.1). The commit
+`Import tier-3 files verbatim from EK Bridge e753b22` holds the unmodified copies, so
+`git diff 7693429 -- Sources/BridgeKitRemote Tests/BridgeKitRemoteTests` shows every change.
+
+| BridgeKitRemote file | EK Bridge source (e753b22) | Changes |
+|---|---|---|
+| `Remote/RemoteMCPService.swift` | `Sources/MCP/RemoteMCPService.swift` | Public API; authenticates through `RemoteAuthenticator` instead of `ClientRegistry`; prefixes, 401 wording and realm from `RemoteBridgeConfiguration`; the gate's tunnel is a `TunnelProvider`; HTTP limits from the core's configuration; `Task` hops to the main actor |
+| `Remote/RemoteSeams.swift` | — | New: `RemoteBridgeConfiguration`, `RemoteTexts`, `RemoteAuthenticator` |
+| `Remote/RemoteAccessSupport.swift` | `Sources/RemoteAccessSupport.swift` | `KeepAwake(reason:)`; `RemoteProbe` returns `RemoteProbeResult` or `RemoteProbeFailure` instead of localized strings |
+| `OAuth/OAuthServer.swift` | `Sources/MCP/OAuthServer.swift` | Scope and token prefixes are instance values from the configuration; page and error wording from `RemoteTexts`; `agentAllowed`/`agentName` (or a `RemoteAuthenticator`) instead of `clientAllowed`/`clientName`; the default timer uses `Task.sleep` |
+| `OAuth/OAuthStore.swift` | `Sources/MCP/OAuthStore.swift` | None (same file format) |
+| `OAuth/OAuthPages.swift` | `Sources/MCP/OAuthPages.swift` | A value holding the app's name and `RemoteTexts` |
+| `OAuth/OAuthTypes.swift` | `Sources/MCP/OAuthTypes.swift` | Public API |
+| `OAuth/CIMDFetcher.swift` | `Sources/MCP/CIMDFetcher.swift` | `User-Agent` from the app; `CIMDFetcher.Testing` instead of `#if EVENTKIT_MCP_TEST` hooks |
+| `Tunnels/TunnelProvider.swift` | `Sources/AgentSetup.swift` (`TunnelProvider`) and `Sources/TunnelHealth.swift` (`detect(address:)`, `installLink`, `asksForHostname`, `hostname`) | Detection and wire names only; names, summaries, steps, notes and commands stay in the app |
+| `Tunnels/TunnelHealth.swift` | `Sources/TunnelHealth.swift` | Without `label`, `detail` and `unreachableReason` (the app words them) |
+| `Tunnels/TunnelChecks.swift` | `Sources/TunnelChecks.swift` | `Sendable` checks; results on the main actor |
+| `Tunnels/TunnelSwitch.swift` | `Sources/TunnelSwitch.swift` | Without step titles and `inSentence`; `TunnelSwitchSummary.make` takes the app's off commands; `TunnelAddressMemory` takes an optional key |
+
+Tests:
+
+| BridgeKit test | EK Bridge source (e753b22) |
+|---|---|
+| `Tests/BridgeKitRemoteTests/*` | `Tests/OAuthServerTests.swift`, `CIMDFetcherTests.swift`, `TunnelHealthTests.swift` (with `Tests/tunnel-health`), `TunnelSwitchTests.swift`, the Remote Access candidate checks of `MCPGateTests.swift`, converted to Swift Testing. Assertions on wording that stayed in EK Bridge stay in EK Bridge's tests |
+| `Tests/harness/remote_test.py` | `Tests/mcp_test.py` `run_remote` and `run_oauth`, against the reference server |

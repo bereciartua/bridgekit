@@ -17,7 +17,9 @@ permissions:
 
 jobs:
   test:
-    runs-on: macos-15
+    # macos-26, as EK Bridge's CI: on macos-15 the TLS stack rejects the CIMD fixture's
+    # self-signed certificate ("bad certificate format"); EK Bridge runs the same test on 26.
+    runs-on: macos-26
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -26,4 +28,6 @@ jobs:
       - name: Unit tests and reference harness
         run: sh scripts/test.sh
       - name: Universal release build
-        run: swift build -c release --product BridgeKitCore --arch arm64 --arch x86_64
+        run: |
+          swift build -c release --product BridgeKitCore --arch arm64 --arch x86_64
+          swift build -c release --product BridgeKitRemote --arch arm64 --arch x86_64

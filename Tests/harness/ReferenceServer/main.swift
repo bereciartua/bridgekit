@@ -1,10 +1,15 @@
 import BridgeKitCore
+import BridgeKitRemote
 import Darwin
 import Foundation
 
 // bridgekit-reference-server: the real listener, gate, MCP server and key
 // files, with a tiny app on top (status, echo and write_note tools, a fake
 // approval panel and an in-memory activity log). Offline: loopback only.
+// It also runs BridgeKitRemote's Remote Access listener on a second loopback
+// port (`remote_start`), as a tunnel would reach it, with a fake sign-in
+// approver (`answer_pairing`). The agent "cloud" has cloud access and a
+// remote token; the start line gives it as agents.cloud.remote.
 //
 // Environment: BRIDGEKIT_TEST_DIR (a private temp folder, required),
 // BRIDGEKIT_TEST_PORT (default 0, any free port), BRIDGEKIT_TEST_CALL_TIMEOUT
@@ -13,6 +18,8 @@ import Foundation
 // when stdin closes.
 
 let keyPrefix = "ref_mcp_v1_"
+let remoteSecret = "q7Zk2vN4bXwP9sL1mT6hYa"
+let remoteOrigin = "https://remote.test"
 
 struct Agent {
     let id: String
@@ -22,6 +29,9 @@ struct Agent {
     var removed = false
     var canWrite: Bool
     var asks: Bool
+    /// Remote Access: allowed from the internet, and the remote token's digest.
+    var cloud = false
+    var remoteDigest: Data?
 }
 
 struct ActivityRow {
@@ -29,6 +39,7 @@ struct ActivityRow {
     let outcome: String
     let agentID: String?
     let agent: String?
+    let remote: Bool
     /// The call's JSON-RPC id and what it costs the response.
     let id: JSONRPCID?
     let idBytes: Int?
@@ -47,7 +58,8 @@ final class App {
 
     func record(_ command: String, _ outcome: String, _ call: ToolCall?) {
         activity.insert(ActivityRow(command: command, outcome: outcome, agentID: call?.agent.id,
-                                    agent: call?.agentName, id: call?.id, idBytes: call?.id.encodedByteCount), at: 0)
+                                    agent: call?.agentName, remote: call?.remote ?? false, id: call?.id,
+                                    idBytes: call?.id.encodedByteCount), at: 0)
     }
 
     /// Waits for `answer`, a cancellation, or (approval mode "timeout") nothing.
@@ -101,6 +113,34 @@ final class Authenticator: AgentAuthenticator {
             return .authenticated(AuthenticatedAgent(id: agent.id, name: agent.name))
         }
     }
+}
+
+/// Remote tokens and OAuth agents, from the same agent list.
+@MainActor
+final class RemoteAgents: RemoteAuthenticator {
+    let app: App
+    var failures = 0
+
+    init(app: App) { self.app = app }
+
+    func authenticate(remoteToken: PresentedKey) async -> AuthenticationOutcome {
+        let candidates = app.agents.values.filter { !$0.removed && $0.cloud }
+            .compactMap { agent in agent.remoteDigest.map { (id: agent.id, digest: $0) } }
+        guard let id = AgentKey.firstMatch(remoteToken.digest, in: candidates), let agent = app.agents[id] else {
+            failures += 1
+            return .rejected
+        }
+        return .authenticated(AuthenticatedAgent(id: agent.id, name: agent.name))
+    }
+
+    func cloudAccessAllowed(agentID: String) -> Bool {
+        guard let agent = app.agents[agentID] else { return false }
+        return agent.cloud && !agent.removed
+    }
+
+    func agentName(agentID: String) -> String? { app.agents[agentID]?.name }
+
+    func recordFailedRemoteAuth() { failures += 1 }
 }
 
 @MainActor
@@ -178,7 +218,8 @@ final class Pipeline: BridgeHandler {
                 return refuse("forbidden", "Not allowed: this agent can't use \(call.name).")
             }
             let isWrite = registry.tool(named: call.name)?.isWrite ?? true
-            if case .limited(let wait) = limiter.allow(call.agent.id, write: isWrite) {
+            // Like EK Bridge: remote calls use the limiter's stricter remote buckets.
+            if case .limited(let wait) = limiter.allow(call.agent.id, write: isWrite, remote: call.remote) {
                 return refuse("rate_limited", "Too many requests. Wait \(wait) s.")
             }
             return (nil, isWrite && agent.asks)
@@ -244,6 +285,11 @@ final class Harness {
     let keyFiles: AgentKeyFiles
     let configuration: BridgeConfiguration
     let service: MCPService
+    let remoteAgents: RemoteAgents
+    let remoteConfiguration: RemoteBridgeConfiguration
+    let oauth: OAuthServer
+    let remote: RemoteMCPService
+    var remoteNotes = [RemoteRequestNote]()
     var lastPort = 0
 
     init(directory: URL, timeout: TimeInterval) {
@@ -268,19 +314,45 @@ final class Harness {
                                didConnect: { id, connection in app.connections[id] = connection })
         service = MCPService(server: server, limiter: limiter, counters: counters,
                              endpointFile: MCPEndpointFile(directory: directory))
+        remoteAgents = RemoteAgents(app: app)
+        remoteConfiguration = RemoteBridgeConfiguration(
+            identity: configuration.identity, defaultPort: 0, remoteTokenPrefix: "ref_mcpr_v1_",
+            accessTokenPrefix: "ref_oat_v1_", refreshTokenPrefix: "ref_ort_v1_", clientSecretPrefix: "ref_ocs_v1_",
+            scope: "notes", userAgentProduct: "ReferenceBridge", storeDirectory: directory,
+            texts: .standard(displayName: "Reference Bridge", agent: "agent"))
+        oauth = OAuthServer(configuration: remoteConfiguration,
+                            fetcher: CIMDFetcher(userAgent: remoteConfiguration.userAgent),
+                            authenticator: remoteAgents)
+        remote = RemoteMCPService(server: server, configuration: remoteConfiguration, authenticator: remoteAgents,
+                                  limiter: limiter, counters: counters, oauth: oauth)
+        remote.didServe = { [unowned self] note in
+            self.remoteNotes.insert(note, at: 0)
+            if self.remoteNotes.count > 50 { self.remoteNotes.removeLast() }
+        }
+    }
+
+    func issueRemoteToken(_ agent: String) -> String {
+        let token = AgentKey.issue(prefix: remoteConfiguration.remoteTokenPrefix)
+        app.agents[agent]?.remoteDigest = AgentKey.digest(token)
+        return token
     }
 
     /// agent: reads and writes · full: the same · reader: no writes ·
     /// none: only status · ask: writes need approval.
+    /// cloud: reads and writes, cloud access and a remote token.
     func makeAgents() -> [String: [String: String]] {
         var result = [String: [String: String]]()
         for (name, canWrite, asks) in [("agent", true, false), ("full", true, false), ("reader", false, false),
-                                       ("none", false, false), ("ask", true, true)] {
+                                       ("none", false, false), ("ask", true, true), ("cloud", true, false)] {
             let id = UUID().uuidString.lowercased()
             let key = AgentKey.issue(prefix: keyPrefix)
             guard case .success = keyFiles.saveNew(agentID: id, key: key) else { fatalError("key file for \(name)") }
             app.agents[id] = Agent(id: id, name: name, digest: AgentKey.digest(key), canWrite: canWrite, asks: asks)
             result[name] = ["id": id, "key": key]
+            if name == "cloud" {
+                app.agents[id]?.cloud = true
+                result[name]?["remote"] = issueRemoteToken(id)
+            }
         }
         return result
     }
@@ -304,7 +376,8 @@ final class Harness {
         case "activity":
             return ["activity": app.activity.map { row -> [String: Any] in
                 var value: [String: Any] = ["command": row.command, "outcome": row.outcome,
-                                            "agentID": row.agentID as Any? ?? NSNull()]
+                                            "agentID": row.agentID as Any? ?? NSNull(),
+                                            "via": row.remote ? "remote" : "mcp"]
                 if let agent = row.agent { value["agent"] = agent }
                 if let id = row.id, let bytes = row.idBytes { (value["id"], value["idBytes"]) = (id.json, bytes) }
                 return value
@@ -337,6 +410,80 @@ final class Harness {
         case "start":
             service.start(port: command["port"] as? Int ?? lastPort)
             return ["ok": true]
+        // Remote Access.
+        case "remote_start":
+            remote.start(RemoteConfiguration(secret: remoteSecret, publicOrigin: remoteOrigin,
+                                             port: command["port"] as? Int ?? 0))
+            return ["ok": true]
+        case "remote_stop":
+            remote.stop()
+            oauth.closePairing()
+            return ["ok": true]
+        case "remote_port":
+            if case .listening(let port) = remote.status { return ["port": port] }
+            return ["port": NSNull()]
+        case "remote_secret":
+            // Reset Path…: a new secret; connections for the old MCP URL are revoked.
+            guard var settings = remote.settings else { return ["ok": false] }
+            settings.secret = command["secret"] as? String ?? RemoteConfiguration.newSecret()
+            remote.update(settings)
+            let removed = settings.oauthContext.map { oauth.revokeConnections(notFor: $0.resource) } ?? 0
+            return ["ok": true, "revoked": removed]
+        case "remote_candidate":
+            guard var settings = remote.settings else { return ["ok": false] }
+            settings.candidateOrigin = command["origin"] as? String
+            remote.update(settings)
+            return ["ok": true]
+        case "set_cloud":
+            guard let agent else { return ["ok": false] }
+            let on = command["on"] as? Bool ?? true
+            app.agents[agent]?.cloud = on
+            if !on {
+                app.agents[agent]?.remoteDigest = nil
+                oauth.revokeAll(clientID: agent)
+            }
+            return ["ok": true]
+        case "issue_remote_token":
+            guard let agent, app.agents[agent]?.cloud == true else { return ["ok": false] }
+            return ["ok": true, "token": issueRemoteToken(agent)]
+        case "nonce":
+            return ["nonce": remote.nonces.issue()]
+        case "remote_notes":
+            return ["notes": remoteNotes.map { ["agentID": $0.clientID, "tunnel": $0.tunnel?.wireName as Any? ?? NSNull(),
+                                                "address": $0.address] }]
+        case "remote_failures":
+            return ["failures": remoteAgents.failures]
+        case "open_pairing":
+            guard let agent else { return ["ok": false] }
+            oauth.openPairing(clientID: agent)
+            return ["ok": true]
+        case "close_pairing":
+            oauth.closePairing()
+            return ["ok": true]
+        case "pairings":
+            return ["pending": oauth.pendingPairings.map {
+                ["id": $0.id.uuidString.lowercased(), "agentID": $0.clientID, "app": $0.appName,
+                 "code": $0.code, "redirectHost": $0.redirectHost]
+            }, "open": oauth.pairingClientID as Any? ?? NSNull()]
+        case "answer_pairing":
+            // The fake sign-in panel: answers the oldest request.
+            guard let first = oauth.pendingPairings.first else { return ["ok": false] }
+            oauth.answerPairing(first.id, allow: command["allow"] as? Bool ?? false)
+            return ["ok": true]
+        case "oauth_connections":
+            guard let agent else { return ["count": 0] }
+            let connections = oauth.connections(clientID: agent)
+            return ["count": connections.count, "ids": connections.map { $0.id.uuidString.lowercased() }]
+        case "revoke_connection":
+            guard let id = (command["id"] as? String).flatMap(UUID.init(uuidString:)) else { return ["ok": false] }
+            oauth.revoke(connectionID: id)
+            return ["ok": true]
+        case "confidential_client":
+            guard let agent, let client = oauth.registerConfidentialClient(
+                for: agent, name: command["name"] as? String ?? "Gemini Enterprise",
+                redirectURI: command["redirect_uri"] as? String ?? "https://vertexaisearch.cloud.google.com/oauth-redirect")
+            else { return ["ok": false] }
+            return ["ok": true, "client_id": client.clientID, "secret": client.secret]
         default:
             return ["error": "unknown command"]
         }
@@ -362,7 +509,10 @@ func startControl(_ harness: Harness) {
             }
         }
         DispatchQueue.main.sync {
-            MainActor.assumeIsolated { box.value.service.stop() }
+            MainActor.assumeIsolated {
+                box.value.service.stop()
+                box.value.remote.stop()
+            }
         }
         exit(0)
     }

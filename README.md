@@ -21,12 +21,31 @@ It holds no domain types. An app plugs in through `BridgeConfiguration` (names, 
 prefix, limits, wording), `AgentAuthenticator` (its own agent store), `ToolRegistry` (its tool
 contract and visibility) and `BridgeHandler` (its request pipeline).
 
+`BridgeKitRemote` (0.2.0) adds Remote Access for cloud agents, on top of the core:
+
+- a second loopback listener for a tunnel the user runs (`RemoteMCPService`, `RemoteHTTPGate`:
+  a 128-bit secret path, the `Host` allowlist, a per-address lockout, health nonces), handing
+  authenticated calls to the same `MCPServer` with `remote: true`;
+- an OAuth 2.1 authorization server for claude.ai, ChatGPT and Gemini Enterprise (`OAuthServer`:
+  RFC 9728 and 8414 metadata, PKCE S256, a pairing window the user opens and approves with a
+  six-digit code, rotating refresh tokens with reuse detection, dynamic registration and clients
+  set up ahead), with its state in a 0600 file that fails closed;
+- the client-metadata fetch (`CIMDFetcher`: https to public addresses only, no redirects or
+  proxies, 16 KB, 5 s);
+- read-only tunnel checks (`TunnelChecks`, `TunnelHealth`: Tailscale Funnel, Cloudflare Tunnel,
+  ngrok, quick tunnels), the Switch Tunnel state (`TunnelSwitch`), the reachability test
+  (`RemoteProbe`) and `KeepAwake`.
+
+An app plugs in through `RemoteBridgeConfiguration` (port, token prefixes, scope, `User-Agent`,
+store folder, `RemoteTexts`) and `RemoteAuthenticator` (which agent a remote credential belongs
+to, and whether it may be used from the internet). Tunnel results are typed; each app words them.
+
 macOS 14 or later, Swift 6, no dependencies. Apache-2.0.
 
 ## Use
 
 ```swift
-.package(url: "https://github.com/bereciartua/bridgekit", exact: "0.1.1")
+.package(url: "https://github.com/bereciartua/bridgekit", exact: "0.2.0")
 ```
 
 Apps pin an exact version. Breaking changes bump the minor version while in 0.x.
@@ -38,8 +57,9 @@ sh scripts/test.sh
 ```
 
 Runs the Swift Testing suites, then the reference harness in `Tests/harness`: a small server
-with an echo tool and a write tool behind a fake approval panel, driven by `mcp_test.py` and
-`launcher_test.py` over real loopback sockets.
+with an echo tool and a write tool behind a fake approval panel, and its Remote Access listener
+with a fake sign-in approver, driven by `mcp_test.py`, `remote_test.py` and `launcher_test.py`
+over real loopback sockets.
 
 ## Linking without SwiftPM
 
@@ -47,11 +67,12 @@ An app built with plain `swiftc` (EK Bridge's `build.sh`) links the static libra
 
 ```bash
 swift build -c release --product BridgeKitCore --arch arm64 --arch x86_64
+swift build -c release --product BridgeKitRemote --arch arm64 --arch x86_64
 ```
 
-This leaves a universal `libBridgeKitCore.a` and `BridgeKitCore.swiftmodule` in
-`.build/out/Products/Release`; pass that folder to `swiftc` with `-I` and `-L`, and add
-`-lBridgeKitCore`.
+This leaves universal `libBridgeKitCore.a` and `libBridgeKitRemote.a`, with their
+`.swiftmodule`s, in `.build/out/Products/Release`; pass that folder to `swiftc` with `-I` and
+`-L`, and add `-lBridgeKitCore -lBridgeKitRemote`.
 
 ## Provenance
 
