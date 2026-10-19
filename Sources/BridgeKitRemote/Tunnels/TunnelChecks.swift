@@ -9,7 +9,7 @@ import Foundation
 /// 127.0.0.1 only, without credentials), and the answer is display only.
 /// A UI-review build passes a fake.
 public struct TunnelChecks: Sendable {
-    public typealias Done = @MainActor @Sendable (TunnelHealth) -> Void
+    public typealias Done = @MainActor @Sendable (TunnelCheckResult) -> Void
 
     /// Checks one tunnel for the Remote Access port; the answer arrives on the main actor.
     public var check: @Sendable (TunnelProvider, Int, @escaping Done) -> Void
@@ -18,12 +18,20 @@ public struct TunnelChecks: Sendable {
         self.check = check
     }
 
-    public static let unavailable = TunnelChecks { _, _, done in Task { @MainActor in done(.unknown) } }
+    public static let unavailable = TunnelChecks { _, _, done in
+        Task { @MainActor in done(TunnelCheckResult(health: .unknown)) }
+    }
 
-    public static let live = TunnelChecks { provider, port, done in
-        DispatchQueue.global(qos: .utility).async {
-            let health = TunnelProbes.check(provider, port: port)
-            Task { @MainActor in done(health) }
+    public static let live = live(mistakenPorts: [])
+
+    /// `mistakenPorts`: local ports a Funnel entry forwards to only by mistake, such as the app's
+    /// own local MCP port (`TailscaleStatus.parse`).
+    public static func live(mistakenPorts: Set<Int>) -> TunnelChecks {
+        TunnelChecks { provider, port, done in
+            DispatchQueue.global(qos: .utility).async {
+                let result = TunnelProbes.check(provider, port: port, mistakenPorts: mistakenPorts)
+                Task { @MainActor in done(result) }
+            }
         }
     }
 }
@@ -36,13 +44,13 @@ public enum TunnelProbes {
     static let cloudflaredMetricsPorts = 20241...20245
     static let ngrokAPIPorts = [4040, 4041, 4042]
 
-    public static func check(_ provider: TunnelProvider, port: Int) -> TunnelHealth {
+    public static func check(_ provider: TunnelProvider, port: Int, mistakenPorts: Set<Int> = []) -> TunnelCheckResult {
         switch provider {
-        case .tailscaleFunnel: return tailscale(port: port)
-        case .cloudflareTunnel: return cloudflared(quick: false, port: port)
-        case .cloudflareQuick: return cloudflared(quick: true, port: port)
-        case .ngrok: return ngrok(port: port)
-        case .other: return .unknown
+        case .tailscaleFunnel: return tailscale(port: port, mistakenPorts: mistakenPorts)
+        case .cloudflareTunnel: return TunnelCheckResult(health: cloudflared(quick: false, port: port))
+        case .cloudflareQuick: return TunnelCheckResult(health: cloudflared(quick: true, port: port))
+        case .ngrok: return TunnelCheckResult(health: ngrok(port: port))
+        case .other: return TunnelCheckResult(health: .unknown)
         }
     }
 
@@ -52,17 +60,20 @@ public enum TunnelProbes {
     static let tailscaleCandidates = ["/Applications/Tailscale.app/Contents/MacOS/Tailscale",
                                       "/opt/homebrew/bin/tailscale", "/usr/local/bin/tailscale"]
 
-    static func tailscale(port: Int) -> TunnelHealth {
-        guard let cli = locate("tailscale", candidates: tailscaleCandidates) else { return .notInstalled }
+    static func tailscale(port: Int, mistakenPorts: Set<Int>) -> TunnelCheckResult {
+        guard let cli = locate("tailscale", candidates: tailscaleCandidates) else {
+            return TunnelCheckResult(health: .notInstalled)
+        }
         // Fixed arguments, stdout only: the CLI warns about version mismatches on stderr.
         let environment = TailscaleStatus.cliEnvironment(ProcessInfo.processInfo.environment)
         guard let status = ProcessRunner.run(cli, ["status", "--json"], timeout: commandTimeout,
                                              environment: environment, mergeErrors: false),
-              !status.timedOut else { return .unknown }
+              !status.timedOut else { return TunnelCheckResult(health: .unknown) }
         let funnel = ProcessRunner.run(cli, ["funnel", "status", "--json"], timeout: commandTimeout,
                                        environment: environment, mergeErrors: false)
-        return TailscaleStatus.parse(status: Data(status.output.utf8),
-                                     funnel: funnel.flatMap { $0.timedOut ? nil : Data($0.output.utf8) }, port: port)
+        return TailscaleStatus.result(status: Data(status.output.utf8),
+                                      funnel: funnel.flatMap { $0.timedOut ? nil : Data($0.output.utf8) }, port: port,
+                                      mistakenPorts: mistakenPorts)
     }
 
     // MARK: cloudflared

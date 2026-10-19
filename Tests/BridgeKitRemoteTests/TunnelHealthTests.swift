@@ -19,14 +19,14 @@ struct TunnelHealthTests {
         let status = try Self.fixture("tailscale-status.json")
         let funnel = try Self.fixture("tailscale-funnel.json")
         let parse = { (status: Data?, funnel: Data?, port: Int) in
-            TailscaleStatus.parse(status: status, funnel: funnel, port: port)
+            TailscaleStatus.parse(status: status, funnel: funnel, port: port, mistakenPorts: [47615])
         }
         // The real config: Funnel on 443 → 47616, and another app's Serve entry on 8443.
         #expect(parse(status, funnel, 47616) == .running(address: "https://my-mac.tail1234.ts.net", port: 47616),
                 "running")
-        // The test copy's port: Funnel forwards elsewhere (live test L1). The 8443 Serve entry isn't shown.
-        #expect(parse(status, funnel, 47626) == .wrongPort(port: 47616, address: "https://my-mac.tail1234.ts.net"),
-                "wrong port, ignoring the other app's Serve entry")
+        // Another app's port (Funes on the same Mac): 443 and 8443 belong to other apps, not to this
+        // tunnel at the wrong port. Not started yet; FunnelPorts picks 10000.
+        #expect(parse(status, funnel, 47627) == .notRunning(reason: .noTunnel), "other apps' entries aren't wrong port")
         #expect(parse(status, try Self.fixture("tailscale-funnel-warning.txt"), 47616)
             == .running(address: "https://my-mac.tail1234.ts.net", port: 47616), "version warning before the JSON")
         var warned = Data("Warning: client version \"1\" != tailscaled server version \"2\"\n".utf8)
@@ -37,6 +37,15 @@ struct TunnelHealthTests {
             == .notPublic(address: "https://my-mac.tail1234.ts.net"), "Serve without Funnel")
         #expect(parse(status, try Self.fixture("tailscale-funnel-wrong-port.json"), 47616)
             == .wrongPort(port: 47615, address: "https://my-mac.tail1234.ts.net"), "Funnel to the MCP port")
+        #expect(TailscaleStatus.parse(status: status, funnel: try Self.fixture("tailscale-funnel-wrong-port.json"),
+                                      port: 47616) == .notRunning(reason: .noTunnel),
+                "a port the app doesn't name as a mistake is another app's")
+        #expect(parse(status, try Self.fixture("tailscale-funnel-all-taken.json"), 47627)
+            == .notRunning(reason: .allPortsTaken), "all three public ports taken")
+        #expect(parse(status, try Self.fixture("tailscale-funnel-all-taken.json"), 47616)
+            == .running(address: "https://my-mac.tail1234.ts.net", port: 47616), "running wins over all taken")
+        #expect(parse(status, try Self.fixture("tailscale-funnel-10000.json"), 47627)
+            == .running(address: "https://my-mac.tail1234.ts.net:10000", port: 47627), "running on 10000")
         #expect(parse(status, try Self.fixture("tailscale-funnel-8443.json"), 47616)
             == .running(address: "https://my-mac.tail1234.ts.net:8443", port: 47616), "8443, localhost and a slash")
         #expect(parse(status, try Self.fixture("tailscale-funnel-none.json"), 47616)

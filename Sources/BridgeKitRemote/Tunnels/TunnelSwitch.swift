@@ -116,13 +116,15 @@ public struct TunnelSwitchSummary: Equatable, Sendable {
     public var noCloudAgents: Bool { updateURLIn.isEmpty && disconnected.isEmpty }
 
     /// `offCommands` are the app's commands that turn a tunnel off (only Funnel keeps
-    /// running in the background).
+    /// running in the background), given the tunnel, the Remote Access port and the address being
+    /// left (its port is Funnel's public port: `TailscaleFunnelCommand.publicPort(fromAddress:)`).
     public static func make(_ change: TunnelSwitch, newOrigin: String, port: Int, remoteTokenClients: [String],
-                            oauthApps: [String], offCommands: (TunnelProvider, Int) -> [String]) -> TunnelSwitchSummary {
+                            oauthApps: [String],
+                            offCommands: (TunnelProvider, Int, String) -> [String]) -> TunnelSwitchSummary {
         let tunnel = change.picked ?? change.fromTunnel
         // Same address through another tunnel: the URL stays, nothing needs updating.
         let urlChanges = newOrigin != change.fromOrigin
-        let off = offCommands(change.fromTunnel, port)
+        let off = offCommands(change.fromTunnel, port, change.fromOrigin)
         let stopping = change.kind == .switchTunnel && tunnel != change.fromTunnel && !off.isEmpty
         return TunnelSwitchSummary(
             tunnel: tunnel,

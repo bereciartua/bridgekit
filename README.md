@@ -21,7 +21,7 @@ It holds no domain types. An app plugs in through `BridgeConfiguration` (names, 
 prefix, limits, wording), `AgentAuthenticator` (its own agent store), `ToolRegistry` (its tool
 contract and visibility) and `BridgeHandler` (its request pipeline).
 
-`BridgeKitRemote` (0.2.0) adds Remote Access for cloud agents, on top of the core:
+`BridgeKitRemote` (0.3.0) adds Remote Access for cloud agents, on top of the core:
 
 - a second loopback listener for a tunnel the user runs (`RemoteMCPService`, `RemoteHTTPGate`:
   a 128-bit secret path, the `Host` allowlist, a per-address lockout, health nonces), handing
@@ -34,7 +34,10 @@ contract and visibility) and `BridgeHandler` (its request pipeline).
   proxies, 16 KB, 5 s);
 - read-only tunnel checks (`TunnelChecks`, `TunnelHealth`: Tailscale Funnel, Cloudflare Tunnel,
   ngrok, quick tunnels), the Switch Tunnel state (`TunnelSwitch`), the reachability test
-  (`RemoteProbe`) and `KeepAwake`.
+  (`RemoteProbe`) and `KeepAwake`;
+- Tailscale Funnel shared by several apps on one Mac (`FunnelPorts`, `TailscaleFunnelCommand`):
+  each uses the first of Funnel's public ports (443, 8443, 10000) with nothing served on it, so
+  no app offers a command that replaces another app's entry.
 
 An app plugs in through `RemoteBridgeConfiguration` (port, token prefixes, scope, `User-Agent`,
 store folder, `RemoteTexts`) and `RemoteAuthenticator` (which agent a remote credential belongs
@@ -45,7 +48,7 @@ macOS 14 or later, Swift 6, no dependencies. Apache-2.0.
 ## Use
 
 ```swift
-.package(url: "https://github.com/bereciartua/bridgekit", exact: "0.2.0")
+.package(url: "https://github.com/bereciartua/bridgekit", exact: "0.3.0")
 ```
 
 Apps pin an exact version. Breaking changes bump the minor version while in 0.x.
