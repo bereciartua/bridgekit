@@ -12,7 +12,7 @@ struct TunnelSwitchTests {
     /// The apps' off commands: only Funnel keeps running in the background, on the address's port.
     static func offCommands(_ provider: TunnelProvider, _ port: Int, _ origin: String) -> [String] {
         provider == .tailscaleFunnel
-            ? [TailscaleFunnelCommand.off(port: port, publicPort: TailscaleFunnelCommand.publicPort(fromAddress: origin))]
+            ? TailscaleFunnelCommand.off(nil, address: origin, paths: ["/r/abc"])
             : []
     }
 
@@ -91,13 +91,13 @@ struct TunnelSwitchTests {
         #expect(full.mcpURL == Self.quick + "/r/••••••/mcp", "the new URL, secret hidden")
         #expect(full.updateURLIn == ["Claude Code"] && full.disconnected == ["claude.ai"] && !full.noCloudAgents,
                 "names")
-        #expect(full.stopTunnel == .tailscaleFunnel && full.stopCommands == ["tailscale funnel --bg 47616 off"],
+        #expect(full.stopTunnel == .tailscaleFunnel && full.stopCommands == ["tailscale funnel --https=443 --set-path /r/abc off"],
                 "then you can stop Tailscale Funnel")
         // Funnel on 8443 (another app has 443): only that port is turned off.
         var shared = TunnelSwitch(kind: .switchTunnel, fromTunnel: .tailscaleFunnel, fromOrigin: Self.funnel + ":8443")
         shared.picked = .cloudflareQuick
         #expect(Self.summary(shared, newOrigin: Self.quick, remoteTokenClients: [], oauthApps: []).stopCommands
-            == ["tailscale funnel --https=8443 off"], "the off command for the address's port")
+            == ["tailscale funnel --https=8443 --set-path /r/abc off"], "the off command for the address's port")
         let none = Self.summary(change, newOrigin: Self.quick, remoteTokenClients: [], oauthApps: [])
         #expect(none.noCloudAgents, "No cloud agents use the current URL yet")
         // Quick tunnel → Tailscale: nothing to stop (Control-C).

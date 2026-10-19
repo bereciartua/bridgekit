@@ -59,7 +59,7 @@ public struct OAuthContext: Sendable {
     public var issuer: String { publicOrigin + secretPrefix }
     public var resource: String { issuer + "/mcp" }
     public var resourceMetadataURL: String {
-        publicOrigin + "/.well-known/oauth-protected-resource" + secretPrefix + "/mcp"
+        publicOrigin + "/.well-known/" + RemotePaths.protectedResource + secretPrefix + "/mcp"
     }
 }
 
@@ -283,10 +283,10 @@ public final class OAuthServer {
         // Exact matches only: dot segments, encoded slashes and case variants fall through to 404.
         let route: Route
         switch request.path {
-        case "/.well-known/oauth-protected-resource" + prefix + "/mcp": route = .resourceMetadata
-        case "/.well-known/oauth-authorization-server" + prefix,
-             "/.well-known/openid-configuration" + prefix,
-             prefix + "/.well-known/openid-configuration": route = .serverMetadata
+        case "/.well-known/" + RemotePaths.protectedResource + prefix + "/mcp": route = .resourceMetadata
+        case "/.well-known/" + RemotePaths.authorizationServer + prefix,
+             "/.well-known/" + RemotePaths.openIDConfiguration + prefix,
+             prefix + "/.well-known/" + RemotePaths.openIDConfiguration: route = .serverMetadata
         case prefix + "/oauth/authorize": route = .authorize
         case prefix + "/oauth/authorize/status": route = .status
         case prefix + "/oauth/token": route = .token

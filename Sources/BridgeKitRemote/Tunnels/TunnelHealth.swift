@@ -17,9 +17,10 @@ public enum TunnelHealth: Equatable, Sendable {
         case funnelNotAllowed
         /// No tunnel at all: start it.
         case noTunnel
-        /// Tailscale Funnel: other apps on this Mac already serve all three public ports
-        /// (`FunnelPorts.publicPorts`), so starting Funnel would replace one of them.
-        case allPortsTaken
+        /// Tailscale Funnel: none of the three public ports (`FunnelPorts.publicPorts`) can take
+        /// Remote Access's paths without changing another app: each has a tailnet-only entry
+        /// (Funnel would make it public) or a raw TCP forwarder.
+        case noSharablePort
     }
 
     /// Forwards to the Remote Access port. `address` is its public https
@@ -27,6 +28,9 @@ public enum TunnelHealth: Equatable, Sendable {
     case running(address: String?, port: Int)
     /// Runs, but forwards to another port.
     case wrongPort(port: Int, address: String?)
+    /// Tailscale Funnel forwards some of Remote Access's paths but not all (`missing` of them):
+    /// sign-in or MCP fails until they're added.
+    case incomplete(address: String?, missing: Int)
     /// Tailscale Serve without Funnel: reachable from the tailnet only.
     case notPublic(address: String?)
     case notRunning(reason: NotRunningReason)
@@ -40,7 +44,7 @@ public enum TunnelHealth: Equatable, Sendable {
     public var tone: Tone {
         switch self {
         case .running: .ok
-        case .wrongPort, .notPublic, .notRunning: .warn
+        case .wrongPort, .incomplete, .notPublic, .notRunning: .warn
         case .notInstalled, .unknown: .neutral
         }
     }
@@ -48,7 +52,7 @@ public enum TunnelHealth: Equatable, Sendable {
     /// While Remote Access is on, these mean cloud agents can't get through (D10).
     public var warns: Bool {
         switch self {
-        case .wrongPort, .notPublic, .notRunning: true
+        case .wrongPort, .incomplete, .notPublic, .notRunning: true
         case .running, .notInstalled, .unknown: false
         }
     }
@@ -62,7 +66,8 @@ public enum TunnelHealth: Equatable, Sendable {
     /// The public address the tool reported, if any.
     public var address: String? {
         switch self {
-        case .running(let address, _), .wrongPort(_, let address), .notPublic(let address): address
+        case .running(let address, _), .wrongPort(_, let address), .incomplete(let address, _),
+             .notPublic(let address): address
         case .notRunning, .notInstalled, .unknown: nil
         }
     }
@@ -78,6 +83,7 @@ public enum TunnelHealth: Equatable, Sendable {
         switch self {
         case .running: "running"
         case .wrongPort: "wrongPort"
+        case .incomplete: "incomplete"
         case .notPublic: "notPublic"
         case .notRunning(let reason): "notRunning.\(reason)"
         case .notInstalled: "notInstalled"
@@ -114,17 +120,26 @@ public enum ToolJSON {
     /// The port a forwarding target names: `http://127.0.0.1:47616`,
     /// `http://localhost:47616/`, `localhost:47616`, `127.0.0.1:47616` or `47616`.
     /// Nil for anything else, including targets on another machine.
-    public static func localPort(_ target: String) -> Int? {
-        var text = target.trimmingCharacters(in: .whitespaces).lowercased()
-        for scheme in ["http://", "https://", "tcp://"] where text.hasPrefix(scheme) {
+    public static func localPort(_ target: String) -> Int? { self.target(target)?.port }
+
+    /// The local port and path a forwarding target names: `http://127.0.0.1:47627/r/abc` is
+    /// (47627, `/r/abc`); a trailing slash alone is no path. Nil for targets on another machine.
+    public static func target(_ target: String) -> (port: Int, path: String)? {
+        var text = target.trimmingCharacters(in: .whitespaces)
+        for scheme in ["http://", "https://", "tcp://"] where text.lowercased().hasPrefix(scheme) {
             text.removeFirst(scheme.count)
         }
-        while text.hasSuffix("/") { text.removeLast() }
-        if let port = Int(text) { return (1...65_535).contains(port) ? port : nil }
-        let parts = text.split(separator: ":", maxSplits: 1).map(String.init)
-        guard parts.count == 2, ["127.0.0.1", "localhost", "[::1]"].contains(parts[0]),
-              let port = Int(parts[1]), (1...65_535).contains(port) else { return nil }
-        return port
+        var path = ""
+        if let slash = text.firstIndex(of: "/") {
+            path = String(text[slash...])
+            text = String(text[..<slash])
+        }
+        while path.hasSuffix("/") { path.removeLast() }
+        text = text.lowercased()
+        if let port = Int(text) { return (1...65_535).contains(port) ? (port, path) : nil }
+        guard let colon = text.lastIndex(of: ":"), ["127.0.0.1", "localhost", "[::1]"].contains(String(text[..<colon])),
+              let port = Int(text[text.index(after: colon)...]), (1...65_535).contains(port) else { return nil }
+        return (port, path)
     }
 
     /// `https://<host>`, with `:<port>` unless it's 443.
@@ -147,10 +162,12 @@ public enum TailscaleStatus {
         return environment
     }
 
-    /// `mistakenPorts` are local ports a Funnel entry forwards to only by mistake, such as the
-    /// app's own local MCP port: those are `.wrongPort`. Any other entry belongs to another app on
-    /// this Mac and isn't this tunnel at all (`FunnelPorts` steers around it).
-    public static func parse(status: Data?, funnel: Data?, port: Int, mistakenPorts: Set<Int> = []) -> TunnelHealth {
+    /// `paths` are the app's public paths (`RemoteConfiguration.publicPaths`). `mistakenPorts` are
+    /// local ports a Funnel entry forwards to only by mistake, such as the app's own local MCP
+    /// port: those are `.wrongPort`. Any other entry belongs to another app on this Mac and isn't
+    /// this tunnel at all (`FunnelPorts` steers around it).
+    public static func parse(status: Data?, funnel: Data?, port: Int, paths: [String],
+                             mistakenPorts: Set<Int> = []) -> TunnelHealth {
         guard let status = ToolJSON.object(status) else { return .unknown }
         switch status["BackendState"] as? String {
         case "Running": break
@@ -159,7 +176,7 @@ public enum TailscaleStatus {
         default: return .unknown
         }
         let me = status["Self"] as? [String: Any]
-        guard let ports = FunnelPorts.parse(funnel: funnel, port: port) else { return .unknown }
+        guard let ports = FunnelPorts.parse(funnel: funnel, port: port, paths: paths) else { return .unknown }
         if let entry = ports.running {
             return .running(address: entry.address, port: port)
         }
@@ -167,7 +184,10 @@ public enum TailscaleStatus {
         let capabilities = me?["Capabilities"] as? [String] ?? []
         let funnelAllowed = capMap.map { $0.keys.contains("funnel") } ?? true || capabilities.contains("funnel")
         if !funnelAllowed { return .notRunning(reason: .funnelNotAllowed) }
-        if let entry = ports.entries.first(where: { $0.targets.contains(port) }) {
+        if let (entry, missing) = ports.incomplete {
+            return .incomplete(address: entry.address, missing: missing.count)
+        }
+        if let entry = ports.entries.first(where: { !$0.funnel && $0.targets.contains(port) }) {
             return .notPublic(address: entry.address)
         }
         for entry in ports.entries where entry.funnel {
@@ -175,16 +195,18 @@ public enum TailscaleStatus {
                 return .wrongPort(port: mistaken, address: entry.address)
             }
         }
-        if ports.publicPort == nil { return .notRunning(reason: .allPortsTaken) }
+        if ports.publicPort == nil { return .notRunning(reason: .noSharablePort) }
         return .notRunning(reason: .noTunnel)
     }
 
     /// The health and the public ports in one answer, for the check.
-    public static func result(status: Data?, funnel: Data?, port: Int, mistakenPorts: Set<Int> = []) -> TunnelCheckResult {
-        let health = parse(status: status, funnel: funnel, port: port, mistakenPorts: mistakenPorts)
+    public static func result(status: Data?, funnel: Data?, port: Int, paths: [String],
+                              mistakenPorts: Set<Int> = []) -> TunnelCheckResult {
+        let health = parse(status: status, funnel: funnel, port: port, paths: paths, mistakenPorts: mistakenPorts)
         switch health {
         case .unknown, .notInstalled: return TunnelCheckResult(health: health)
-        default: return TunnelCheckResult(health: health, funnel: FunnelPorts.parse(funnel: funnel, port: port))
+        default:
+            return TunnelCheckResult(health: health, funnel: FunnelPorts.parse(funnel: funnel, port: port, paths: paths))
         }
     }
 }
@@ -391,7 +413,7 @@ public enum TunnelStartState: Equatable, Sendable {
         case nil: return .waiting
         case .running(let address, _)?: return .found(address: address)
         case .notRunning(let reason)? where reason == .noTunnel || reason == .stopped: return .waiting
-        case .notRunning?, .wrongPort?, .notPublic?: return .problem(health!)
+        case .notRunning?, .wrongPort?, .incomplete?, .notPublic?: return .problem(health!)
         case .notInstalled?, .unknown?: return .cantCheck(health)
         }
     }

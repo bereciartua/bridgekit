@@ -59,6 +59,32 @@ struct RemoteGateTests {
 
     static let base = RemoteConfiguration(secret: secret, publicOrigin: "https://my-mac.tail1234.ts.net", port: 47616)
 
+    /// Every route the gate lets through is under `publicPaths`, the paths a tunnel shared by path
+    /// forwards; discovery documents it doesn't serve, and paths outside them, are 404.
+    @Test("every route is under publicPaths, and nothing else is answered")
+    func publicPaths() {
+        let paths = Self.base.publicPaths
+        #expect(paths == [Self.prefix, "/.well-known/oauth-protected-resource" + Self.prefix,
+                          "/.well-known/oauth-authorization-server" + Self.prefix,
+                          "/.well-known/openid-configuration" + Self.prefix], "the four paths")
+        let host = "my-mac.tail1234.ts.net"
+        let served = Self.routes + [("GET", Self.prefix + "/health?nonce=abc"), ("POST", Self.prefix + "/oauth/register"),
+                                    ("POST", Self.prefix + "/oauth/revoke"), ("GET", Self.prefix + "/oauth/authorize/status"),
+                                    ("GET", "/.well-known/openid-configuration" + Self.prefix)]
+        for (method, target) in served {
+            let path = String(target.prefix { $0 != "?" })
+            #expect(RemotePaths.covers(paths, path), "\(path) is under publicPaths")
+            #expect(Self.verdict(method, target, host: host, configuration: Self.base) != "404", "\(path) is answered")
+        }
+        for target in ["/.well-known/security.txt" + Self.prefix, "/.well-known/oauth-protected-resource",
+                       "/.well-known/other" + Self.prefix + "/mcp", Self.prefix + "x/mcp", "/r/other/mcp", "/"] {
+            #expect(!RemotePaths.covers(paths, target), "\(target) is outside publicPaths")
+            #expect(Self.verdict("GET", target, host: host, configuration: Self.base) == "404", "\(target) is 404")
+        }
+        #expect(RemotePaths.covers([Self.prefix], Self.prefix) && RemotePaths.covers([Self.prefix], Self.prefix + "/mcp")
+                && !RemotePaths.covers([Self.prefix], Self.prefix + "x"), "by whole segment")
+    }
+
     /// While a new address is tested, its Host gets the health check only: MCP, OAuth and
     /// discovery with that Host are still 421.
     @Test("no candidate: its Host is 421 everywhere")

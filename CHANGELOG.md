@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.0
+
+Apps share Tailscale Funnel's **port 443 by path**. 0.3.0 gave a second app another public port, but claude.ai and ChatGPT only connect to 443 (anthropics/claude-ai-mcp#373).
+
+- `RemotePaths` and `RemoteConfiguration.publicPaths`: the four paths Remote Access answers, one list for the gate, the OAuth server and the tunnel commands. They are the secret prefix, and the protected-resource, authorization-server and OpenID discovery documents with the secret prefix after their name. The gate now answers discovery only under those three names.
+- `TailscaleFunnelCommand.start(port:publicPort:paths:)` adds one path entry per path, each forwarding to the same path. `off(publicPort:paths:)` removes them, always naming the path: a bare `tailscale funnel --https=443 off` turns off every app on the port. `off(_:address:paths:)` also turns off a whole-port `/` entry from before by path, and `resetPath` swaps the old secret's paths for the new ones.
+- `FunnelPorts` reads path entries, and decides from the app's port and paths:
+  - `running`: all paths, or a whole-port `/` from before;
+  - `incomplete`, with the missing paths;
+  - `publicPort`: 443 unless it has a tailnet-only entry, which Funnel would make public, or a raw TCP forwarder;
+  - `reachesCloudAgents` and `pathsToAdd`.
+- `ToolJSON.target` reads a forwarding target's port and path.
+- Breaking:
+  - `TunnelChecks.check`, `TunnelProbes.check`, `TailscaleStatus.parse` and `result` take the app's public paths.
+  - New `TunnelHealth.incomplete(address:missing:)`.
+  - `NotRunningReason.allPortsTaken` is now `noSharablePort`.
+  - `TailscaleFunnelCommand`'s single-port `start(port:publicPort:)` and `off(port:publicPort:)` are gone.
+  - `FunnelPorts.Entry` has `handlers` instead of `targets` (still available, computed) and `tcpForward`.
+
 ## 0.3.0
 
 Several apps can now share Tailscale Funnel on one Mac. Funes Vault and EK Bridge both use it,

@@ -19,7 +19,8 @@ struct TunnelHealthTests {
         let status = try Self.fixture("tailscale-status.json")
         let funnel = try Self.fixture("tailscale-funnel.json")
         let parse = { (status: Data?, funnel: Data?, port: Int) in
-            TailscaleStatus.parse(status: status, funnel: funnel, port: port, mistakenPorts: [47615])
+            TailscaleStatus.parse(status: status, funnel: funnel, port: port, paths: FunnelPortsTests.paths,
+                                  mistakenPorts: [47615])
         }
         // The real config: Funnel on 443 → 47616, and another app's Serve entry on 8443.
         #expect(parse(status, funnel, 47616) == .running(address: "https://my-mac.tail1234.ts.net", port: 47616),
@@ -38,10 +39,19 @@ struct TunnelHealthTests {
         #expect(parse(status, try Self.fixture("tailscale-funnel-wrong-port.json"), 47616)
             == .wrongPort(port: 47615, address: "https://my-mac.tail1234.ts.net"), "Funnel to the MCP port")
         #expect(TailscaleStatus.parse(status: status, funnel: try Self.fixture("tailscale-funnel-wrong-port.json"),
-                                      port: 47616) == .notRunning(reason: .noTunnel),
+                                      port: 47616, paths: FunnelPortsTests.paths) == .notRunning(reason: .noTunnel),
                 "a port the app doesn't name as a mistake is another app's")
+        // 443 is public through Funnel, so its paths can be shared even with the other ports busy.
         #expect(parse(status, try Self.fixture("tailscale-funnel-all-taken.json"), 47627)
-            == .notRunning(reason: .allPortsTaken), "all three public ports taken")
+            == .notRunning(reason: .noTunnel), "443 shareable")
+        #expect(parse(status, try Self.fixture("tailscale-funnel-unsharable.json"), 47627)
+            == .notRunning(reason: .noSharablePort), "no port can take the paths")
+        #expect(parse(status, try Self.fixture("tailscale-funnel-paths.json"), 47627)
+            == .running(address: "https://my-mac.tail1234.ts.net", port: 47627), "Funes's paths beside EK Bridge's /")
+        #expect(parse(status, try Self.fixture("tailscale-funnel-paths.json"), 47616)
+            == .running(address: "https://my-mac.tail1234.ts.net", port: 47616), "EK Bridge's / beside them")
+        #expect(parse(status, try Self.fixture("tailscale-funnel-paths-incomplete.json"), 47627)
+            == .incomplete(address: "https://my-mac.tail1234.ts.net", missing: 1), "three of four paths")
         #expect(parse(status, try Self.fixture("tailscale-funnel-all-taken.json"), 47616)
             == .running(address: "https://my-mac.tail1234.ts.net", port: 47616), "running wins over all taken")
         #expect(parse(status, try Self.fixture("tailscale-funnel-10000.json"), 47627)
