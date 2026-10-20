@@ -128,4 +128,77 @@ struct FunnelPortsTests {
         #expect(TailscaleFunnelCommand.resetPath(legacy, address: nil, port: 47627, oldPaths: Self.paths,
                                                  newPaths: newPaths).isEmpty, "a / forwards any path")
     }
+
+    @Test("a setup on 10000 or 8443 moves to 443 once 443 can take the paths")
+    func moveTo443() throws {
+        let start = TailscaleFunnelCommand.start(port: 47627, paths: Self.paths)
+        let host = "https://my-mac.tail1234.ts.net"
+        // Funes 0.1.1's drafts: a whole-port / on 10000, beside EK Bridge's / on 443.
+        let legacy = try Self.ports("tailscale-funnel-10000.json")
+        let move = try #require(TailscaleFunnelCommand.moveTo443(legacy, address: host + ":10000"))
+        #expect(move == FunnelPorts.Move(from: 10000, start: start,
+                                         off: ["tailscale funnel --https=10000 --set-path / off"], address: host))
+        #expect(move.commands == start + move.off, "443 first, then the old port")
+        #expect(TailscaleFunnelCommand.moveTo443(legacy, address: nil) == move, "no address: where it runs")
+        #expect(TailscaleFunnelCommand.moveTo443(legacy, address: host) == move,
+                "an address without a port, but Funnel still on 10000")
+        // The four paths on 8443: each turned off by path.
+        let paths8443 = try Self.ports("tailscale-funnel-paths-8443.json")
+        #expect(paths8443.running?.publicPort == 8443 && paths8443.sharable(443))
+        #expect(TailscaleFunnelCommand.moveTo443(paths8443, address: host + ":8443")
+            == FunnelPorts.Move(from: 8443, start: start, off: TailscaleFunnelCommand.off(publicPort: 8443, paths: Self.paths),
+                                address: host))
+        // EK Bridge's own / on 8443.
+        let ekPaths = RemoteConfiguration(secret: "ekSecretPath", publicOrigin: nil, port: 47616).publicPaths
+        let ek = try #require(FunnelPorts.parse(funnel: try TunnelHealthTests.fixture("tailscale-funnel-8443.json"),
+                                                port: 47616, paths: ekPaths))
+        #expect(TailscaleFunnelCommand.moveTo443(ek, address: host + ":8443")
+            == FunnelPorts.Move(from: 8443, start: TailscaleFunnelCommand.start(port: 47616, paths: ekPaths),
+                                off: ["tailscale funnel --https=8443 --set-path / off"], address: host))
+        // Not running, the address still on 10000: 443's commands, nothing to turn off.
+        let none = try Self.ports("tailscale-funnel-none.json")
+        #expect(TailscaleFunnelCommand.moveTo443(none, address: host + ":10000")
+            == FunnelPorts.Move(from: 10000, start: start, off: [], address: host))
+        // Half done: the paths are on 443 already, the address still has :10000.
+        let shared = try Self.ports("tailscale-funnel-paths.json")
+        #expect(TailscaleFunnelCommand.moveTo443(shared, address: host + ":10000")
+            == FunnelPorts.Move(from: 10000, start: [], off: [], address: host), "only the address is left")
+        // Incomplete on 10000: the paths it has there go.
+        let three = FunnelPorts(entries: [
+            FunnelPorts.Entry(publicPort: 443, host: "my-mac.tail1234.ts.net", handlers: [.init(path: "/", port: 47616)],
+                              funnel: true),
+            FunnelPorts.Entry(publicPort: 10000, host: "my-mac.tail1234.ts.net",
+                              handlers: Self.paths.prefix(3).map { .init(path: $0, port: 47627, targetPath: $0) }, funnel: true),
+        ], port: 47627, paths: Self.paths)
+        #expect(three.incomplete?.entry.publicPort == 10000)
+        #expect(TailscaleFunnelCommand.moveTo443(three, address: host + ":10000")?.off
+            == TailscaleFunnelCommand.off(publicPort: 10000, paths: Array(Self.paths.prefix(3))))
+        for ports in [legacy, paths8443, none, shared, three] {
+            let commands = TailscaleFunnelCommand.moveTo443(ports, address: host + ":10000")?.commands ?? []
+            #expect(commands.allSatisfy { $0.contains("--set-path ") }, "never a bare off")
+        }
+    }
+
+    @Test("no move: already on 443, 443 still unsharable, or nothing read")
+    func noMove() throws {
+        let host = "https://my-mac.tail1234.ts.net"
+        #expect(TailscaleFunnelCommand.moveTo443(try Self.ports("tailscale-funnel-paths.json"), address: host) == nil,
+                "running on 443")
+        #expect(TailscaleFunnelCommand.moveTo443(try Self.ports("tailscale-funnel-none.json"), address: host) == nil,
+                "not running, an address on 443: the usual start commands")
+        let tailnet443 = FunnelPorts(entries: [
+            FunnelPorts.Entry(publicPort: 443, host: "my-mac.tail1234.ts.net", handlers: [.init(path: "/", port: 4000)],
+                              funnel: false),
+            FunnelPorts.Entry(publicPort: 8443, host: "my-mac.tail1234.ts.net", handlers: [.init(path: "/", port: 47627)],
+                              funnel: true),
+        ], port: 47627, paths: Self.paths)
+        #expect(tailnet443.running?.publicPort == 8443 && !tailnet443.sharable(443))
+        #expect(TailscaleFunnelCommand.moveTo443(tailnet443, address: host + ":8443") == nil,
+                "a tailnet-only 443 would become public")
+        let tcp443 = FunnelPorts(entries: [
+            FunnelPorts.Entry(publicPort: 443, host: nil, handlers: [], funnel: true, tcpForward: 5432),
+        ], port: 47627, paths: Self.paths)
+        #expect(TailscaleFunnelCommand.moveTo443(tcp443, address: host + ":10000") == nil, "a TCP forwarder on 443")
+        #expect(TailscaleFunnelCommand.moveTo443(nil, address: host + ":10000") == nil, "the check couldn't read Funnel")
+    }
 }

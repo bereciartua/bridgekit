@@ -21,7 +21,7 @@ It holds no domain types. An app plugs in through `BridgeConfiguration` (names, 
 prefix, limits, wording), `AgentAuthenticator` (its own agent store), `ToolRegistry` (its tool
 contract and visibility) and `BridgeHandler` (its request pipeline).
 
-`BridgeKitRemote` (0.4.0) adds Remote Access for cloud agents, on top of the core:
+`BridgeKitRemote` (0.4.1) adds Remote Access for cloud agents, on top of the core:
 
 - a second loopback listener for a tunnel the user runs (`RemoteMCPService`, `RemoteHTTPGate`:
   a 128-bit secret path, the `Host` allowlist, a per-address lockout, health nonces), handing
@@ -38,7 +38,8 @@ contract and visibility) and `BridgeHandler` (its request pipeline).
 - Tailscale Funnel's port 443 shared by several apps on one Mac (`RemotePaths`, `FunnelPorts`,
   `TailscaleFunnelCommand`): each adds only its own paths (`RemoteConfiguration.publicPaths`),
   so no app replaces another's entry, and claude.ai and ChatGPT, which only connect to 443,
-  reach all of them.
+  reach all of them. A setup left on 8443 or 10000 gets the commands that move it to 443
+  (`TailscaleFunnelCommand.moveTo443`).
 
 An app plugs in through `RemoteBridgeConfiguration` (port, token prefixes, scope, `User-Agent`,
 store folder, `RemoteTexts`) and `RemoteAuthenticator` (which agent a remote credential belongs
@@ -49,7 +50,7 @@ macOS 14 or later, Swift 6, no dependencies. Apache-2.0.
 ## Use
 
 ```swift
-.package(url: "https://github.com/bereciartua/bridgekit", exact: "0.4.0")
+.package(url: "https://github.com/bereciartua/bridgekit", exact: "0.4.1")
 ```
 
 Apps pin an exact version. Breaking changes bump the minor version while in 0.x.
