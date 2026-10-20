@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.1
+
+A Remote Access setup on Tailscale Funnel's port 8443 or 10000 can move to 443, which claude.ai and ChatGPT need. Such setups come from 0.3.0's other public ports or a port picked by hand; until now they showed as running, or got start commands for the old port.
+
+- `TailscaleFunnelCommand.moveTo443(_:address:)` returns a `FunnelPorts.Move` once 443 can take the app's paths (`FunnelPorts.sharable(443)`). It's nil when the app is on 443 already, or the check couldn't read what Funnel serves.
+- The move has:
+  - `from`: the address's port, else where Remote Access runs or is incomplete;
+  - `start`: the app's paths on 443 that 443 doesn't forward to it yet;
+  - `off`: what it has on the old port, by path, or `--set-path /` for a whole-port entry;
+  - `address`: the address without a port, for the app's address editor.
+- Additive only.
+
 ## 0.4.0
 
 Apps share Tailscale Funnel's **port 443 by path**. 0.3.0 gave a second app another public port, but claude.ai and ChatGPT only connect to 443 (anthropics/claude-ai-mcp#373).

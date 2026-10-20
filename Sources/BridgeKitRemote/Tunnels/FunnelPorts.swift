@@ -223,6 +223,54 @@ public enum TailscaleFunnelCommand {
     public static func publicPort(fromAddress address: String?) -> Int {
         address.flatMap(URL.init(string:))?.port ?? 443
     }
+
+    /// Moving Remote Access to 443 from 8443 or 10000, where setups from before path sharing (or a
+    /// port picked by hand) put it, once 443 can take its paths. Nil when it's on 443 already, 443
+    /// still can't take them, or the check couldn't read what's served.
+    public static func moveTo443(_ ports: FunnelPorts?, address: String?) -> FunnelPorts.Move? {
+        let target = FunnelPorts.cloudAgentPort
+        guard let ports, ports.sharable(target) else { return nil }
+        // The address's port is what cloud agents connect to; without one, where it runs.
+        let addressPort = publicPort(fromAddress: address)
+        let from = addressPort != target ? addressPort : (ports.running ?? ports.incomplete?.entry)?.publicPort
+        guard let from, from != target else { return nil }
+        let on443 = ports.entry(on: target)
+        let start = on443?.forwardsWholePort(to: ports.port) == true
+            ? [] : ports.paths.filter { on443?.forwards($0, to: ports.port) != true }
+        var offPaths = [String]()
+        if let old = ports.entry(on: from) {
+            offPaths = (old.forwardsWholePort(to: ports.port) ? ["/"] : []) + ports.ownPaths(old)
+        }
+        let host = address.flatMap(URL.init(string:))?.host ?? ports.entry(on: from)?.host ?? on443?.host
+        return FunnelPorts.Move(from: from, start: self.start(port: ports.port, publicPort: target, paths: start),
+                                off: off(publicPort: from, paths: offPaths),
+                                address: host.map { ToolJSON.origin(host: $0, port: target) })
+    }
+}
+
+extension FunnelPorts {
+    /// `TailscaleFunnelCommand.moveTo443`: claude.ai and ChatGPT only connect to 443.
+    public struct Move: Equatable, Sendable {
+        /// The public port Remote Access leaves: the address's, else where it runs or is incomplete.
+        public let from: Int
+        /// Its paths on 443, those 443 doesn't forward to it yet.
+        public let start: [String]
+        /// Then what it has on `from` off: its paths there, or `/` for a whole-port entry. Empty
+        /// when nothing there forwards to it.
+        public let off: [String]
+        /// The address without a port, for Address ▸ Edit…; nil when the host isn't known.
+        public let address: String?
+
+        public init(from: Int, start: [String], off: [String], address: String?) {
+            self.from = from
+            self.start = start
+            self.off = off
+            self.address = address
+        }
+
+        /// In the order to run them: 443 first, so the old port goes only once the new one forwards.
+        public var commands: [String] { start + off }
+    }
 }
 
 /// One tunnel check's answer.
